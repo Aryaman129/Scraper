@@ -7,17 +7,19 @@ RUN apt-get update && apt-get install -y \
     python3 \
     python3-pip \
     python3-setuptools \
-    python3-wheel
+    python3-wheel \
+    python3-venv
 
-# Alternative way to get distutils
-RUN pip3 install --upgrade pip setuptools wheel
+# Create and use a virtual environment instead of modifying system Python
+RUN python3 -m venv /app/venv
+ENV PATH="/app/venv/bin:$PATH"
 
 # Set up working directory
 WORKDIR /app
 
-# Copy requirements and install
+# Copy requirements and install in the virtual environment
 COPY requirements.txt .
-RUN pip3 install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY . .
@@ -25,5 +27,5 @@ COPY . .
 # Expose port
 EXPOSE 8080
 
-# Run the application
-CMD ["python3", "-m", "gunicorn", "app:app", "-b", "0.0.0.0:8080", "--timeout", "180"] 
+# Run the application with the virtual environment Python
+CMD ["/app/venv/bin/python", "-m", "gunicorn", "app:app", "-b", "0.0.0.0:8080", "--timeout", "180"] 
