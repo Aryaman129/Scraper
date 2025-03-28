@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 from webdriver_manager.chrome import ChromeDriverManager
 from datetime import datetime, timedelta
 import jwt
+from selenium.common.exceptions import TimeoutException, StaleElementReferenceException
 
 # Load environment variables from .env file
 load_dotenv()
@@ -1427,6 +1428,51 @@ class SRMScraper:
             return 0
         except:
             return 0
+
+    def switch_to_iframe_safely(self, iframe_selector, max_attempts=3, wait_time=5):
+        """Safely switch to an iframe with multiple attempts and proper waits"""
+        logger.info(f"Attempting to switch to iframe: {iframe_selector}")
+        
+        for attempt in range(1, max_attempts + 1):
+            try:
+                # First make sure we're in the main content
+                self.driver.switch_to.default_content()
+                
+                # Wait for the iframe to be available in the DOM
+                WebDriverWait(self.driver, wait_time).until(
+                    EC.presence_of_element_located(iframe_selector)
+                )
+                
+                # Wait a bit more for the iframe to fully load
+                time.sleep(2)
+                
+                # Get the iframe element
+                iframe = self.driver.find_element(*iframe_selector)
+                
+                # Scroll to the iframe to make sure it's in view
+                self.driver.execute_script("arguments[0].scrollIntoView(true);", iframe)
+                
+                # Switch to the iframe
+                self.driver.switch_to.frame(iframe)
+                logger.info(f"✅ Successfully switched to iframe on attempt {attempt}")
+                return True
+                
+            except (TimeoutException, StaleElementReferenceException) as e:
+                logger.warning(f"⚠️ Attempt {attempt} to switch to iframe failed: {e}")
+                # Take a screenshot for debugging
+                try:
+                    screenshot_path = f"/tmp/iframe_switch_failure_{attempt}.png"
+                    self.driver.save_screenshot(screenshot_path)
+                    logger.info(f"Screenshot saved to {screenshot_path}")
+                except Exception as ss_err:
+                    logger.warning(f"Failed to save screenshot: {ss_err}")
+                    
+                if attempt == max_attempts:
+                    logger.error(f"❌ Failed to switch to iframe after {max_attempts} attempts")
+                    return False
+                
+                # Wait before trying again
+                time.sleep(3)
 
 # Public interface to match the original script
 def run_scraper(email, password, scraper_type="attendance"):
