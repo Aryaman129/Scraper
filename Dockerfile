@@ -2,11 +2,15 @@ FROM selenium/standalone-chrome:latest
 
 USER root
 
-# Install Python and pip
+# Install Python and pip without python3-distutils
 RUN apt-get update && apt-get install -y \
     python3 \
     python3-pip \
-    python3-distutils
+    python3-setuptools \
+    python3-wheel
+
+# Alternative way to get distutils
+RUN pip3 install --upgrade pip setuptools wheel
 
 # Set up working directory
 WORKDIR /app
