@@ -1,10 +1,13 @@
 from flask import Flask, request, jsonify
 import threading
 import traceback
-from srm_scrapper import SRMScraper, run_scraper
+from srm_scrapper import SRMScraper
 import os
+from flask_cors import CORS
 
 app = Flask(__name__)
+# Enable CORS for all domains to allow calls from any API server
+CORS(app, origins="*", supports_credentials=True, allow_headers=["Content-Type", "Authorization"])
 
 @app.route('/health', methods=['GET'])
 def health_check():
@@ -17,24 +20,45 @@ def login():
     password = data.get('password')
     
     try:
-        # Get cookies from SRM
+        # Create scraper and perform login
         scraper = SRMScraper(email, password)
-        cookies = scraper.get_srm_cookies()
+        driver = scraper.setup_driver()
+        login_success = scraper.login()
+        
+        if not login_success:
+            return jsonify({'success': False, 'error': 'Login failed'}), 401
+            
+        # Extract cookies from the browser
+        browser_cookies = driver.get_cookies()
+        cookie_dict = {cookie['name']: cookie['value'] for cookie in browser_cookies}
+        
+        # Cleanup
+        driver.quit()
         
         return jsonify({
             'success': True,
-            'cookies': cookies
+            'cookies': cookie_dict
         })
     except Exception as e:
         print(f"Login error: {str(e)}")
         traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/scrape', methods=['POST'])
 def scrape():
     data = request.json
+    if not data:
+        return jsonify({'success': False, 'error': 'No data provided'}), 400
+        
     email = data.get('email')
     cookies = data.get('cookies')
+    
+    if not email:
+        return jsonify({'success': False, 'error': 'Email is required'}), 400
+    if not cookies:
+        return jsonify({'success': False, 'error': 'Cookies are required'}), 400
+    
+    print(f"Received scrape request for {email} with {len(cookies)} cookies")
     
     def run_scraper_thread():
         try:
@@ -43,6 +67,7 @@ def scrape():
             driver = scraper.setup_driver()
             
             # Apply cookies
+            print(f"Applying {len(cookies)} cookies")
             driver.get("https://academia.srmist.edu.in")
             for name, value in cookies.items():
                 driver.add_cookie({
@@ -51,15 +76,33 @@ def scrape():
                     'domain': '.srmist.edu.in'
                 })
             
-            # Get attendance page
+            # Get attendance page with intelligent waiting
+            print("Navigating to attendance page with smart loading detection")
             html_source = scraper.get_attendance_page()
             
             if html_source:
-                # Parse and save data
-                scraper.parse_and_save_attendance(html_source, driver)
-                scraper.parse_and_save_marks(html_source, driver)
+                # Verify the page loaded correctly
+                if "Internal Marks Detail" in html_source or "Course Code" in html_source:
+                    print("✅ Page loaded successfully with expected content")
+                    
+                    # Parse and save data
+                    print("Parsing attendance data")
+                    attendance_success = scraper.parse_and_save_attendance(html_source, driver)
+                    print(f"Attendance parsing {'succeeded' if attendance_success else 'failed'}")
+                    
+                    print("Parsing marks data")
+                    marks_success = scraper.parse_and_save_marks(html_source, driver)
+                    print(f"Marks parsing {'succeeded' if marks_success else 'failed'}")
+                else:
+                    print("⚠️ Page loaded but may be missing expected content")
+                    # Still try to parse the data
+                    scraper.parse_and_save_attendance(html_source, driver)
+                    scraper.parse_and_save_marks(html_source, driver)
+            else:
+                print("❌ Failed to get attendance page HTML")
             
             driver.quit()
+            print("Scraper thread completed")
             
         except Exception as e:
             print(f"Scraper error: {str(e)}")
@@ -73,6 +116,20 @@ def scrape():
         'message': 'Scraper started'
     })
 
+@app.route('/status', methods=['GET'])
+def status():
+    """Return version and environment info"""
+    import sys
+    import platform
+    
+    return jsonify({
+        'status': 'ok',
+        'python_version': sys.version,
+        'platform': platform.platform(),
+        'host': platform.node()
+    })
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
+    # Use 0.0.0.0 to allow external connections
     app.run(host='0.0.0.0', port=port)

@@ -437,20 +437,43 @@ class SRMScraper:
             return False
 
     def get_attendance_page(self):
-        """Navigate to attendance page and get HTML"""
+        """Navigate to attendance page and get HTML with better load detection"""
         if not self.ensure_login():
             return None
-            
+        
         logger.info("Navigating to attendance page")
         self.driver.get(ATTENDANCE_PAGE_URL)
         
+        # First, give it a reasonable time to start loading
+        initial_wait = 15  # seconds
+        logger.info(f"Waiting initial {initial_wait} seconds for page to load")
+        time.sleep(initial_wait)
+        
+        # Then check for the marks message text that indicates the page is fully loaded
+        max_additional_wait = 15  # total max wait will be initial_wait + max_additional_wait
+        marks_text = "Internal Marks Detail will be updated after each assessment has been conducted."
+        
         try:
-            time.sleep(15)
-            logger.info("Attendance page loaded successfully")
+            logger.info("Looking for marks text to confirm page is fully loaded")
+            wait = WebDriverWait(self.driver, max_additional_wait)
+            wait.until(EC.text_to_be_present_in_element(
+                (By.XPATH, "//*[contains(text(), 'Internal Marks Detail')]"),
+                marks_text
+            ))
+            logger.info("✅ Attendance page fully loaded with marks section")
         except Exception as e:
-            logger.warning(f"Timed out waiting for attendance page: {e}")
-            # Fallback to a longer sleep if the element isn't found
-            logger.info("Using fixed sleep time of 55 seconds")
+            logger.warning(f"Could not find marks text after waiting: {e}")
+            # Try looking for other indicators that the page loaded correctly
+            try:
+                logger.info("Looking for attendance table as fallback")
+                wait = WebDriverWait(self.driver, 5)  # Short additional wait
+                wait.until(EC.presence_of_element_located(
+                    (By.XPATH, "//table[contains(., 'Course Code')]")
+                ))
+                logger.info("✅ Found attendance table, proceeding")
+            except Exception as e2:
+                logger.error(f"Could not verify page loaded correctly: {e2}")
+                logger.info("Continuing anyway, but data may be incomplete")
         
         html_source = self.driver.page_source
         return html_source
