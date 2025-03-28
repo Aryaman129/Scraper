@@ -15,8 +15,9 @@ python-dotenv>=0.19.0
 selenium>=4.0.0
 beautifulsoup4>=4.9.3
 supabase>=1.0.3
-webdriver-manager>=4.0.0 
+webdriver-manager>=4.0.0
 undetected-chromedriver>=3.1.0
+requests>=2.25.1
 
 
 
