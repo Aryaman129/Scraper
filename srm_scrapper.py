@@ -173,6 +173,12 @@ class SRMScraper:
         chrome_options.add_argument('--disable-features=IsolateOrigins')
         chrome_options.add_argument('--disable-site-isolation-trials')
         
+        # Add these user agent settings
+        chrome_options.add_argument('--user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"')
+
+        # Disable iframe content security policy
+        chrome_options.add_argument('--disable-content-security-policy')
+        
         try:
             # Try direct approach with Chrome binary specified
             logger.info("Attempting to initialize Chrome driver directly...")
@@ -244,39 +250,66 @@ class SRMScraper:
             self.driver.get(LOGIN_URL)
             wait = WebDriverWait(self.driver, 30)
             
-            # Use the new safe iframe switch method
-            iframe_switch_success = self.switch_to_iframe_safely((By.ID, "signinFrame"), max_attempts=5, wait_time=15)
+            # Try multiple iframe selection strategies
+            iframe_switch_success = False
+            
+            # Strategy 1: Try the original signinFrame ID
+            iframe_switch_success = self.switch_to_iframe_safely((By.ID, "signinFrame"), max_attempts=2, wait_time=10)
+            
+            # Strategy 2: If Strategy 1 fails, try the previewIframe
             if not iframe_switch_success:
-                logger.error("Failed to switch to login iframe after multiple attempts")
+                logger.info("Trying alternative iframe strategy: previewIframe")
+                iframe_switch_success = self.switch_to_iframe_safely((By.NAME, "previewIframe"), max_attempts=2, wait_time=10)
+            
+            # Strategy 3: If Strategy 2 fails, try the wmspconnect iframe
+            if not iframe_switch_success:
+                logger.info("Trying alternative iframe strategy: wmspconnect")
+                iframe_switch_success = self.switch_to_iframe_safely((By.NAME, "wmspconnect"), max_attempts=2, wait_time=10)
+            
+            # Strategy 4: If all specific strategies fail, try the first iframe on the page
+            if not iframe_switch_success:
+                logger.info("Trying last resort iframe strategy: first iframe on page")
+                # Wait for at least one iframe to appear
+                WebDriverWait(self.driver, 15).until(
+                    lambda d: len(d.find_elements(By.TAG_NAME, "iframe")) > 0
+                )
+                # Switch to the first iframe
+                iframes = self.driver.find_elements(By.TAG_NAME, "iframe")
+                if iframes:
+                    try:
+                        self.driver.switch_to.frame(iframes[0])
+                        logger.info("✅ Successfully switched to first iframe on page")
+                        iframe_switch_success = True
+                    except Exception as e:
+                        logger.warning(f"⚠️ Failed to switch to first iframe: {e}")
+            
+            if not iframe_switch_success:
+                logger.error("Failed to switch to any login iframe after multiple strategies")
                 return False
             
-            # Enter email with retry
-            for attempt in range(3):
-                try:
-                    email_field = wait.until(EC.presence_of_element_located((By.ID, "login_id")))
-                    email_field.clear()  # Clear first
-                    time.sleep(0.5)
-                    email_field.send_keys(self.email)
-                    logger.info(f"Entered email: {self.email}")
-                    break
-                except Exception as e:
-                    logger.warning(f"⚠️ Attempt {attempt+1} to enter email failed: {e}")
-                    if attempt == 2:  # Last attempt failed
-                        raise
-                    time.sleep(2)
+            # Find login elements flexibly
+            email_field, next_btn = self.find_login_elements()
+            if not email_field or not next_btn:
+                logger.error("Could not find login elements after switching to iframe")
+                return False
 
-            # Click Next button with retry
-            for attempt in range(3):
-                try:
-                    next_btn = wait.until(EC.element_to_be_clickable((By.ID, "nextbtn")))
-                    self.driver.execute_script("arguments[0].click();", next_btn)  # JavaScript click
-                    logger.info("Clicked Next")
-                    break
-                except Exception as e:
-                    logger.warning(f"⚠️ Attempt {attempt+1} to click Next failed: {e}")
-                    if attempt == 2:  # Last attempt failed
-                        raise
-                    time.sleep(2)
+            # Enter email
+            try:
+                email_field.clear()
+                time.sleep(0.5)
+                email_field.send_keys(self.email)
+                logger.info(f"Entered email: {self.email}")
+            except Exception as e:
+                logger.error(f"Failed to enter email: {e}")
+                return False
+
+            # Click Next/Login button
+            try:
+                self.driver.execute_script("arguments[0].click();", next_btn)  # JavaScript click
+                logger.info("Clicked Next/Login button")
+            except Exception as e:
+                logger.error(f"Failed to click Next/Login button: {e}")
+                return False
 
             # ===== Critical Fix: Wait longer and switch iframe context if needed =====
             # Wait longer for the page transition to complete
@@ -1501,6 +1534,43 @@ class SRMScraper:
                     logger.info("Refreshing page for final attempt...")
                     self.driver.refresh()
                     time.sleep(5)
+
+    def find_login_elements(self):
+        """Find login elements using multiple strategies"""
+        wait = WebDriverWait(self.driver, 10)
+        
+        # Try to find email field
+        email_field = None
+        for selector in [
+            (By.ID, "login_id"),
+            (By.NAME, "username"),
+            (By.CSS_SELECTOR, "input[type='email']"),
+            (By.CSS_SELECTOR, "input[type='text']"),
+        ]:
+            try:
+                email_field = wait.until(EC.presence_of_element_located(selector))
+                logger.info(f"Found email field using selector: {selector}")
+                break
+            except:
+                continue
+        
+        # Try to find login button
+        login_button = None
+        for selector in [
+            (By.ID, "nextbtn"),
+            (By.CSS_SELECTOR, "button[type='submit']"),
+            (By.XPATH, "//button[contains(text(), 'Next')]"),
+            (By.XPATH, "//button[contains(text(), 'Login')]"),
+            (By.XPATH, "//input[@type='submit']"),
+        ]:
+            try:
+                login_button = wait.until(EC.element_to_be_clickable(selector))
+                logger.info(f"Found login button using selector: {selector}")
+                break
+            except:
+                continue
+        
+        return email_field, login_button
 
 # Public interface to match the original script
 def run_scraper(email, password, scraper_type="attendance"):
