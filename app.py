@@ -122,6 +122,13 @@ def scrape_timetable():
     email = data.get('email')
     cookies = data.get('cookies')
     
+    if not email:
+        return jsonify({'success': False, 'error': 'Email is required'}), 400
+    if not cookies:
+        return jsonify({'success': False, 'error': 'Cookies are required'}), 400
+    
+    print(f"Received timetable scrape request for {email} with {len(cookies)} cookies")
+    
     def run_timetable_scraper_thread():
         try:
             # Create scraper without password (using cookies)
@@ -129,6 +136,7 @@ def scrape_timetable():
             driver = scraper.setup_driver()
             
             # Apply cookies
+            print(f"Applying {len(cookies)} cookies for timetable scraping")
             driver.get("https://academia.srmist.edu.in")
             for name, value in cookies.items():
                 driver.add_cookie({
@@ -137,15 +145,20 @@ def scrape_timetable():
                     'domain': '.srmist.edu.in'
                 })
             
-            # Get timetable page and parse
+            # Get timetable page
+            print("Navigating to timetable page")
             html_source = scraper.get_timetable_page()
             
             if html_source:
-                # Run timetable scraper
+                # Parse and save data
+                print("Running timetable scraper")
                 result = scraper.run_timetable_scraper()
-                print(f"Timetable scraper result: {result['status']}")
+                print(f"Timetable scraping {'succeeded' if result.get('status') == 'success' else 'failed'}")
+            else:
+                print("Failed to get timetable page HTML")
             
             driver.quit()
+            print("Timetable scraper thread completed")
             
         except Exception as e:
             print(f"Timetable scraper error: {str(e)}")
