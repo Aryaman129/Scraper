@@ -167,6 +167,12 @@ class SRMScraper:
         chrome_options.add_experimental_option('excludeSwitches', ['enable-automation'])
         chrome_options.add_experimental_option('useAutomationExtension', False)
         
+        # Additional Railway-specific options
+        chrome_options.add_argument('--disable-web-security')
+        chrome_options.add_argument('--allow-running-insecure-content')
+        chrome_options.add_argument('--disable-features=IsolateOrigins')
+        chrome_options.add_argument('--disable-site-isolation-trials')
+        
         try:
             # Try direct approach with Chrome binary specified
             logger.info("Attempting to initialize Chrome driver directly...")
@@ -238,18 +244,12 @@ class SRMScraper:
             self.driver.get(LOGIN_URL)
             wait = WebDriverWait(self.driver, 30)
             
-            # Switch to iframe with retry
-            for attempt in range(3):
-                try:
-                    wait.until(EC.frame_to_be_available_and_switch_to_it((By.ID, "signinFrame")))
-                    logger.info("Switched to login iframe")
-                    break
-                except Exception as e:
-                    logger.warning(f"⚠️ Attempt {attempt+1} to switch to iframe failed: {e}")
-                    if attempt == 2:  # Last attempt failed
-                        raise
-                    time.sleep(2)
-                
+            # Use the new safe iframe switch method
+            iframe_switch_success = self.switch_to_iframe_safely((By.ID, "signinFrame"), max_attempts=5, wait_time=15)
+            if not iframe_switch_success:
+                logger.error("Failed to switch to login iframe after multiple attempts")
+                return False
+            
             # Enter email with retry
             for attempt in range(3):
                 try:
@@ -1429,7 +1429,7 @@ class SRMScraper:
         except:
             return 0
 
-    def switch_to_iframe_safely(self, iframe_selector, max_attempts=3, wait_time=5):
+    def switch_to_iframe_safely(self, iframe_selector, max_attempts=3, wait_time=10):
         """Safely switch to an iframe with multiple attempts and proper waits"""
         logger.info(f"Attempting to switch to iframe: {iframe_selector}")
         
@@ -1437,6 +1437,26 @@ class SRMScraper:
             try:
                 # First make sure we're in the main content
                 self.driver.switch_to.default_content()
+                
+                # Wait for page to be fully loaded first
+                WebDriverWait(self.driver, wait_time).until(
+                    lambda d: d.execute_script('return document.readyState') == 'complete'
+                )
+                
+                # Take a screenshot for debugging
+                try:
+                    self.driver.save_screenshot(f"/tmp/before_iframe_switch_{attempt}.png")
+                    logger.info(f"Saved screenshot before iframe switch attempt {attempt}")
+                except Exception as ss_err:
+                    logger.warning(f"Failed to save pre-switch screenshot: {ss_err}")
+                
+                # See if iframe exists at all
+                iframes = self.driver.find_elements(By.TAG_NAME, "iframe")
+                logger.info(f"Found {len(iframes)} iframes on page")
+                for i, frame in enumerate(iframes):
+                    frame_id = frame.get_attribute("id") or "No ID"
+                    frame_name = frame.get_attribute("name") or "No Name"
+                    logger.info(f"Frame {i}: ID={frame_id}, Name={frame_name}")
                 
                 # Wait for the iframe to be available in the DOM
                 WebDriverWait(self.driver, wait_time).until(
@@ -1451,6 +1471,7 @@ class SRMScraper:
                 
                 # Scroll to the iframe to make sure it's in view
                 self.driver.execute_script("arguments[0].scrollIntoView(true);", iframe)
+                time.sleep(1)
                 
                 # Switch to the iframe
                 self.driver.switch_to.frame(iframe)
@@ -1459,6 +1480,7 @@ class SRMScraper:
                 
             except (TimeoutException, StaleElementReferenceException) as e:
                 logger.warning(f"⚠️ Attempt {attempt} to switch to iframe failed: {e}")
+                
                 # Take a screenshot for debugging
                 try:
                     screenshot_path = f"/tmp/iframe_switch_failure_{attempt}.png"
@@ -1472,7 +1494,13 @@ class SRMScraper:
                     return False
                 
                 # Wait before trying again
-                time.sleep(3)
+                time.sleep(5)
+                
+                # Try refreshing the page as a last resort on the final attempt
+                if attempt == max_attempts - 1:
+                    logger.info("Refreshing page for final attempt...")
+                    self.driver.refresh()
+                    time.sleep(5)
 
 # Public interface to match the original script
 def run_scraper(email, password, scraper_type="attendance"):
