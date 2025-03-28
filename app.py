@@ -116,6 +116,49 @@ def scrape():
         'message': 'Scraper started'
     })
 
+@app.route('/api/scrape-timetable', methods=['POST'])
+def scrape_timetable():
+    data = request.json
+    email = data.get('email')
+    cookies = data.get('cookies')
+    
+    def run_timetable_scraper_thread():
+        try:
+            # Create scraper without password (using cookies)
+            scraper = SRMScraper(email, None)
+            driver = scraper.setup_driver()
+            
+            # Apply cookies
+            driver.get("https://academia.srmist.edu.in")
+            for name, value in cookies.items():
+                driver.add_cookie({
+                    'name': name,
+                    'value': value,
+                    'domain': '.srmist.edu.in'
+                })
+            
+            # Get timetable page and parse
+            html_source = scraper.get_timetable_page()
+            
+            if html_source:
+                # Run timetable scraper
+                result = scraper.run_timetable_scraper()
+                print(f"Timetable scraper result: {result['status']}")
+            
+            driver.quit()
+            
+        except Exception as e:
+            print(f"Timetable scraper error: {str(e)}")
+            traceback.print_exc()
+    
+    # Start scraper in background
+    threading.Thread(target=run_timetable_scraper_thread, daemon=True).start()
+    
+    return jsonify({
+        'success': True,
+        'message': 'Timetable scraper started'
+    })
+
 @app.route('/status', methods=['GET'])
 def status():
     """Return version and environment info"""
