@@ -4,6 +4,7 @@ import traceback
 from srm_scrapper import SRMScraper
 import os
 from flask_cors import CORS
+import bs4
 
 app = Flask(__name__)
 # Enable CORS for all domains to allow calls from any API server
@@ -87,7 +88,12 @@ def scrape():
                     
                     # Parse and save data
                     print("Parsing attendance data")
-                    attendance_success = scraper.parse_and_save_attendance(html_source, driver)
+                    # Extract registration number from HTML to get user_id
+                    soup = bs4.BeautifulSoup(html_source, "html.parser")
+                    registration_number = scraper.extract_registration_number(soup)
+                    user_id = scraper.get_user_id_robust(registration_number)
+                    
+                    attendance_success = scraper.parse_and_save_attendance_robust(html_source, user_id)
                     print(f"Attendance parsing {'succeeded' if attendance_success else 'failed'}")
                     
                     print("Parsing marks data")
@@ -96,7 +102,11 @@ def scrape():
                 else:
                     print("⚠️ Page loaded but may be missing expected content")
                     # Still try to parse the data
-                    scraper.parse_and_save_attendance(html_source, driver)
+                    soup = bs4.BeautifulSoup(html_source, "html.parser")
+                    registration_number = scraper.extract_registration_number(soup)
+                    user_id = scraper.get_user_id_robust(registration_number)
+                    
+                    scraper.parse_and_save_attendance_robust(html_source, user_id)
                     scraper.parse_and_save_marks(html_source, driver)
             else:
                 print("❌ Failed to get attendance page HTML")
