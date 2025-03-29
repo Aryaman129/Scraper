@@ -290,7 +290,7 @@ class SRMScraper:
                     time.sleep(3)
                     
                     # Connect to the running Chrome instance
-                    from selenium.webdriver.chrome.options import Options
+                    # Use the Options class that was already imported at the top of the file
                     chrome_options = Options()
                     chrome_options.add_experimental_option("debuggerAddress", f"127.0.0.1:{debug_port}")
                     self.driver = webdriver.Chrome(options=chrome_options)
