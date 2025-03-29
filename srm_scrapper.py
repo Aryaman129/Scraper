@@ -828,7 +828,7 @@ class SRMScraper:
         self.driver.get(ATTENDANCE_PAGE_URL)
         
         # First, give it a reasonable time to start loading
-        initial_wait = 15  # seconds
+        initial_wait = 22  # seconds
         logger.info(f"Waiting initial {initial_wait} seconds for page to load")
         time.sleep(initial_wait)
         
@@ -971,20 +971,19 @@ class SRMScraper:
                 logger.error(f"BeautifulSoup parsing failed: {parse_err}")
                 # Try a more lenient parser
                 soup = BeautifulSoup(html, "html5lib")
-        except Exception as e:
-                logger.error(f"BeautifulSoup parsing failed: {e}")
+            
             # ===== Multi-strategy attendance table extraction =====
-        attendance_tables = []
+            attendance_tables = []
             
             # Strategy 1: Look for tables containing "Course Code"
-        logger.info("Trying to find attendance tables containing 'Course Code'")
-        tables_1 = [table for table in soup.find_all("table") if "Course Code" in table.text]
-        if tables_1:
+            logger.info("Trying to find attendance tables containing 'Course Code'")
+            tables_1 = [table for table in soup.find_all("table") if "Course Code" in table.text]
+            if tables_1:
                 logger.info(f"Found {len(tables_1)} attendance tables using Strategy 1")
                 attendance_tables.extend(tables_1)
             
             # Strategy 2: Look for tables with specific structure
-        if not attendance_tables:
+            if not attendance_tables:
                 logger.info("Trying to find attendance tables with attendance structure")
                 for table in soup.find_all("table"):
                     # Check header row for attendance-related columns
@@ -1002,7 +1001,7 @@ class SRMScraper:
                     logger.info(f"Found {len(attendance_tables)} attendance tables using Strategy 2")
             
             # Strategy 3: Look for any tables near "Attendance" text
-        if not attendance_tables:
+            if not attendance_tables:
                 logger.info("Trying to find attendance tables by proximity to 'Attendance' text")
                 attendance_heading = soup.find(string=lambda s: s and "Attendance" in s)
                 if attendance_heading:
@@ -1021,8 +1020,8 @@ class SRMScraper:
                     logger.info(f"Found {len(attendance_tables)} attendance tables using Strategy 3")
             
             # If no tables found, check if we can proceed with other sections
-                if not attendance_tables:
-                   logger.error("No attendance tables found in the HTML!")
+            if not attendance_tables:
+                logger.error("No attendance tables found in the HTML!")
                 # Save empty attendance data as placeholder
                 empty_attendance = {
                     "registration_number": "Unknown",
@@ -1033,105 +1032,160 @@ class SRMScraper:
                 self.upsert_attendance_data(user_id, empty_attendance)
                 return False
 
-            # ===== Multi-strategy attendance record extraction =====
-                logger.info(f"Processing {len(attendance_tables)} attendance tables")
-        attendance_records = []
+            # ===== Updated attendance record extraction - direct approach for SRM format =====
+            logger.info(f"Processing {len(attendance_tables)} attendance tables")
+            attendance_records = []
             
-        for table_idx, attendance_table in enumerate(attendance_tables):
+            for table_idx, attendance_table in enumerate(attendance_tables):
                 logger.info(f"Processing attendance table {table_idx+1}")
                 
-                # Try to determine header row and column mapping
-                header_row = attendance_table.find("tr")
-                if not header_row:
-                    logger.warning(f"Table {table_idx+1}: No header row found, skipping")
+                # Get rows and skip header
+                rows = attendance_table.find_all("tr")
+                if not rows:
+                    logger.warning(f"Table {table_idx+1}: No rows found, skipping")
                     continue
                 
+                # First row is header
+                header_row = rows[0]
+                data_rows = rows[1:]  # Skip header
+                
+                # Get header cells and create column map with index positions
                 header_cells = header_row.find_all(["th", "td"])
                 headers = [cell.get_text(strip=True).lower() for cell in header_cells]
                 
-                # Try to map column indices to standard field names
+                # Create column map for standard fields
                 col_map = {}
                 for i, header in enumerate(headers):
-                    if "course code" in header or "subject code" in header:
+                    if "course code" in header:
                         col_map["course_code"] = i
-                    elif "course title" in header or "subject name" in header or "course name" in header:
+                    elif "course title" in header or "course name" in header:
                         col_map["course_title"] = i
                     elif "category" in header:
                         col_map["category"] = i
-                    elif "faculty" in header or "teacher" in header or "instructor" in header:
+                    elif "faculty" in header:
                         col_map["faculty"] = i
-                    elif "slot" in header or "period" in header or "time" in header:
+                    elif "slot" in header:
                         col_map["slot"] = i
                     elif "conducted" in header:
                         col_map["hours_conducted"] = i
                     elif "absent" in header:
                         col_map["hours_absent"] = i
-                    elif "attendance" in header and "percentage" in header:
+                    elif "attn %" in header or "attendance" in header:
                         col_map["attendance_percentage"] = i
                 
-                # Skip table if we couldn't map essential columns
-                essential_cols = ["course_code", "course_title"]
-                missing_cols = [col for col in essential_cols if col not in col_map]
-                if missing_cols:
-                    logger.warning(f"Table {table_idx+1}: Missing essential columns: {missing_cols}, skipping")
-                    continue
-                
-                # Process data rows
-                data_rows = attendance_table.find_all("tr")[1:]  # skip header row
-                for row_idx, row in enumerate(data_rows):
-                    cells = row.find_all("td")
+                # If we didn't find essential columns, try direct processing instead
+                if "course_code" not in col_map or "course_title" not in col_map:
+                    logger.warning(f"Table {table_idx+1}: Missing essential columns, trying direct row processing")
                     
-                    # Skip rows with too few cells
-                    min_cells_needed = max(col_map.values()) + 1
-                    if len(cells) < min_cells_needed:
-                        logger.warning(f"Table {table_idx+1}, Row {row_idx+1}: Not enough cells, skipping")
-                        continue
-                    
-                    try:
-                        # Create record with None for missing fields
-                        record = {field: None for field in ["course_code", "course_title", "category", 
-                                                           "faculty", "slot", "hours_conducted", 
-                                                           "hours_absent", "attendance_percentage"]}
-                        
-                        # Fill in mapped fields
-                        for field, col_idx in col_map.items():
-                            if col_idx < len(cells):
-                                cell_text = cells[col_idx].get_text(strip=True)
+                    # Process directly with fixed expectations for SRM format
+                    for row_idx, row in enumerate(data_rows):
+                        try:
+                            cells = row.find_all("td")
+                            if len(cells) < 5:  # Minimum cells required
+                                continue
                                 
-                                # Type conversion for numerical fields
-                                if field == "hours_conducted":
-                                    record[field] = int(cell_text) if cell_text.strip().isdigit() else 0
-                                elif field == "hours_absent":
-                                    record[field] = int(cell_text) if cell_text.strip().isdigit() else 0
-                                elif field == "attendance_percentage":
-                                    record[field] = float(cell_text) if cell_text.strip().replace('.', '', 1).isdigit() else 0.0
-                                else:
-                                    record[field] = cell_text
-                        
-                        # Validate the record
-                        if not record["course_code"] or not record["course_title"]:
-                            logger.warning(f"Table {table_idx+1}, Row {row_idx+1}: Missing course code/title, skipping")
-                            continue
+                            # Extract course code - handle nested elements
+                            course_code = cells[0].get_text(strip=True)
+                            if "Regular" in course_code:
+                                # Split on "Regular" or extract just the code part
+                                course_code = course_code.split("Regular")[0].strip()
+                            
+                            # Extract other fields directly
+                            record = {
+                                "course_code": course_code,
+                                "course_title": cells[1].get_text(strip=True),
+                                "category": cells[2].get_text(strip=True) if len(cells) > 2 else "",
+                                "faculty": cells[3].get_text(strip=True) if len(cells) > 3 else "",
+                                "slot": cells[4].get_text(strip=True) if len(cells) > 4 else "",
+                                "hours_conducted": 0,
+                                "hours_absent": 0,
+                                "attendance_percentage": 0
+                            }
+                            
+                            # Try to get numerical values
+                            if len(cells) > 5:
+                                try:
+                                    record["hours_conducted"] = int(cells[5].get_text(strip=True))
+                                except:
+                                    pass
+                                
+                            if len(cells) > 6:
+                                try:
+                                    record["hours_absent"] = int(cells[6].get_text(strip=True))
+                                except:
+                                    pass
+                                
+                            if len(cells) > 7:
+                                try:
+                                    attn_text = cells[7].get_text(strip=True).replace('%', '')
+                                    record["attendance_percentage"] = float(attn_text)
+                                except:
+                                    pass
                             
                             attendance_records.append(record)
-                        
-                    except Exception as record_error:
-                        logger.warning(f"Error processing row {row_idx+1} in table {table_idx+1}: {record_error}")
-                        continue
+                        except Exception as row_error:
+                            logger.warning(f"Error processing row {row_idx+1} in table {table_idx+1}: {row_error}")
+                            continue
+                else:
+                    # Process with column mapping
+                    for row_idx, row in enumerate(data_rows):
+                        try:
+                            cells = row.find_all("td")
+                            
+                            # Create a record with default values
+                            record = {
+                                "course_code": "",
+                                "course_title": "",
+                                "category": "",
+                                "faculty": "",
+                                "slot": "",
+                                "hours_conducted": 0,
+                                "hours_absent": 0,
+                                "attendance_percentage": 0
+                            }
+                            
+                            # Fill values based on available cells and column mapping
+                            for field, col_idx in col_map.items():
+                                if col_idx < len(cells):
+                                    cell_text = cells[col_idx].get_text(strip=True)
+                                    
+                                    # Special handling for course code with "Regular" suffix
+                                    if field == "course_code" and "Regular" in cell_text:
+                                        # Extract just the code part
+                                        cell_text = cell_text.split("Regular")[0].strip()
+                                    
+                                    # Type conversion for numerical fields
+                                    if field == "hours_conducted":
+                                        record[field] = int(cell_text) if cell_text.strip().isdigit() else 0
+                                    elif field == "hours_absent":
+                                        record[field] = int(cell_text) if cell_text.strip().isdigit() else 0
+                                    elif field == "attendance_percentage":
+                                        # Extract just the number, ignoring % sign
+                                        attn_text = cell_text.replace('%', '')
+                                        record[field] = float(attn_text) if attn_text.strip().replace('.', '', 1).isdigit() else 0.0
+                                    else:
+                                        record[field] = cell_text
+                            
+                            # Only add if we have essential fields
+                            if record["course_code"] and record["course_title"]:
+                                attendance_records.append(record)
+                        except Exception as row_error:
+                            logger.warning(f"Error processing row {row_idx+1} in table {table_idx+1}: {row_error}")
+                            continue
             
             # Deduplicate records
-        deduplicated_records = {}
-        for record in attendance_records:
+            deduplicated_records = {}
+            for record in attendance_records:
                 key = (record["course_code"], record["category"]) if record["category"] else record["course_code"]
                 # Keep the record with the most information
                 if key not in deduplicated_records or self._record_completeness(record) > self._record_completeness(deduplicated_records[key]):
                     deduplicated_records[key] = record
             
-        attendance_records = list(deduplicated_records.values())
-        logger.info(f"Extracted {len(attendance_records)} unique attendance records")
+            attendance_records = list(deduplicated_records.values())
+            logger.info(f"Extracted {len(attendance_records)} unique attendance records")
             
             # If we have no records, check if we should continue
-        if not attendance_records:
+            if not attendance_records:
                 logger.warning("No attendance records extracted, saving empty data")
                 empty_attendance = {
                     "registration_number": "Unknown",
@@ -1143,15 +1197,20 @@ class SRMScraper:
                 return False
             
             # Construct the full attendance JSON
-        registration_number = self.extract_registration_number_robust(soup) or "Unknown"
-        attendance_json = {
+            registration_number = self.extract_registration_number_robust(soup) or "Unknown"
+            attendance_json = {
                 "registration_number": registration_number,
                 "last_updated": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
                 "records": attendance_records
             }
 
             # Save to database with retry
-        return self.upsert_attendance_data(user_id, attendance_json)
+            return self.upsert_attendance_data(user_id, attendance_json)
+            
+        except Exception as e:
+            logger.error(f"Error in attendance parsing: {e}")
+            traceback.print_exc()
+            return False
 
     def _record_completeness(self, record):
         """Helper to determine how complete a record is"""
