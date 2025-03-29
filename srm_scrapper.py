@@ -19,14 +19,70 @@ from webdriver_manager.chrome import ChromeDriverManager
 from datetime import datetime, timedelta
 import jwt
 from selenium.common.exceptions import TimeoutException, StaleElementReferenceException
+import hashlib
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+import functools
+import logging.handlers
 
 # Load environment variables from .env file
 load_dotenv()
 
 # ====== Logging Setup ======
 # Set up logging BEFORE calling any functions that use it
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+def setup_logging():
+    """
+    Setup comprehensive logging with rotation to prevent log files from growing too large.
+    This helps with troubleshooting in production environments.
+    """
+    # Create logs directory if it doesn't exist
+    os.makedirs("logs", exist_ok=True)
+    
+    # Configure root logger
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    
+    # Remove any existing handlers to prevent duplicates
+    for handler in logger.handlers[:]:
+        logger.removeHandler(handler)
+    
+    # Console handler for immediate feedback
+    console = logging.StreamHandler()
+    console.setLevel(logging.INFO)
+    console_format = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    console.setFormatter(console_format)
+    logger.addHandler(console)
+    
+    # Rotating file handler to prevent huge log files
+    rotating = logging.handlers.RotatingFileHandler(
+        filename="logs/scraper.log",
+        maxBytes=10485760,  # 10MB
+        backupCount=10
+    )
+    rotating.setLevel(logging.DEBUG)  # More detailed in file
+    file_format = logging.Formatter('%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s')
+    rotating.setFormatter(file_format)
+    logger.addHandler(rotating)
+    
+    # Set up a special error log for critical issues
+    error_log = logging.handlers.RotatingFileHandler(
+        filename="logs/errors.log",
+        maxBytes=5242880,  # 5MB
+        backupCount=5
+    )
+    error_log.setLevel(logging.ERROR)
+    error_log.setFormatter(file_format)
+    logger.addHandler(error_log)
+    
+    # Log startup message
+    logger.info("==== SRM Scraper Starting ====")
+    logger.info(f"Python version: {sys.version}")
+    logger.info(f"Current directory: {os.getcwd()}")
+    
+    return logger
+
+logger = setup_logging()
 
 # Environment variable logging for Render debugging
 def log_environment():
@@ -138,80 +194,138 @@ class SRMScraper:
         self.password = password
         
     def setup_driver(self):
-        """Initialize Chrome driver with appropriate options for Render deployment"""
-        logger.info("Setting up Chrome driver...")
+        """Initialize Chrome driver with robust fallback mechanisms for any environment"""
+        logger.info("Setting up Chrome driver with enhanced robustness...")
         
         chrome_options = Options()
-        # Essential flags for containerized environment
-        chrome_options.add_argument('--headless')
-        chrome_options.add_argument('--no-sandbox')
-        chrome_options.add_argument('--disable-dev-shm-usage')
-        chrome_options.add_argument('--disable-gpu')
         
-        # Additional flags for Railway/container environment
-        chrome_options.add_argument('--disable-software-rasterizer')
-        chrome_options.add_argument('--disable-extensions')
-        chrome_options.binary_location = "/usr/bin/google-chrome-stable"  # Set Chrome binary location
+        # Core headless settings with multiple user agents to try
+        user_agents = [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        ]
+        
+        # Container optimization flags
+        container_flags = [
+            '--headless',
+            '--no-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-gpu',
+            '--disable-software-rasterizer',
+            '--disable-extensions',
+            '--disable-web-security',
+            '--allow-running-insecure-content',
+            '--disable-features=IsolateOrigins',
+            '--disable-site-isolation-trials',
+            '--disable-content-security-policy',
+            '--window-size=1920,1080',
+            '--start-maximized',
+            '--disable-blink-features=AutomationControlled'
+        ]
         
         # Memory optimization flags
-        chrome_options.add_argument('--disable-renderer-backgrounding')
-        chrome_options.add_argument('--disable-background-timer-throttling')
-        chrome_options.add_argument('--disable-backgrounding-occluded-windows')
-        chrome_options.add_argument('--disable-client-side-phishing-detection')
-        chrome_options.add_argument('--memory-pressure-off')
+        memory_flags = [
+            '--disable-renderer-backgrounding',
+            '--disable-background-timer-throttling',
+            '--disable-backgrounding-occluded-windows',
+            '--disable-client-side-phishing-detection',
+            '--memory-pressure-off'
+        ]
         
-        # Basic optimization flags
-        chrome_options.add_argument('--window-size=1920,1080')
-        chrome_options.add_argument('--start-maximized')
-        chrome_options.add_argument('--disable-blink-features=AutomationControlled')
+        # Apply all flags
+        for flag in container_flags + memory_flags:
+            chrome_options.add_argument(flag)
+        
+        # Set experimental options
         chrome_options.add_experimental_option('excludeSwitches', ['enable-automation'])
         chrome_options.add_experimental_option('useAutomationExtension', False)
         
-        # Additional Railway-specific options
-        chrome_options.add_argument('--disable-web-security')
-        chrome_options.add_argument('--allow-running-insecure-content')
-        chrome_options.add_argument('--disable-features=IsolateOrigins')
-        chrome_options.add_argument('--disable-site-isolation-trials')
-        
-        # Add these user agent settings
-        chrome_options.add_argument('--user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"')
-
-        # Disable iframe content security policy
-        chrome_options.add_argument('--disable-content-security-policy')
-        
-        try:
-            # Try direct approach with Chrome binary specified
-            logger.info("Attempting to initialize Chrome driver directly...")
-            self.driver = webdriver.Chrome(options=chrome_options)
-            logger.info("✅ Chrome driver successfully initialized directly")
-            return self.driver
-        except Exception as e1:
-            logger.warning(f"⚠️ Direct initialization failed: {e1}")
+        # Try to initialize driver with progressively more aggressive fallbacks
+        for attempt in range(5):
+            logger.info(f"Chrome driver initialization attempt {attempt+1}/5")
             
+            # Set a different user agent for each attempt
+            if attempt < len(user_agents):
+                chrome_options.add_argument(f'--user-agent="{user_agents[attempt]}"')
+            
+            # Try different initialization strategies based on attempt number
             try:
-                # Try with webdriver-manager
-                logger.info("Attempting to initialize Chrome driver with webdriver-manager...")
-                from selenium.webdriver.chrome.service import Service
-                from webdriver_manager.chrome import ChromeDriverManager
-                service = Service(ChromeDriverManager().install())
-                self.driver = webdriver.Chrome(service=service, options=chrome_options)
-                logger.info("✅ Chrome driver successfully initialized with webdriver-manager")
-                return self.driver
-            except Exception as e2:
-                logger.warning(f"⚠️ Webdriver-manager initialization failed: {e2}")
-                
-                try:
-                    # Final attempt using a direct path that should exist in our Docker container
-                    logger.info("Attempting with direct ChromeDriver path...")
-                    chrome_driver_path = "/usr/local/bin/chromedriver"
-                    service = Service(executable_path=chrome_driver_path)
+                if attempt == 0:
+                    # Standard approach
+                    logger.info("Trying standard ChromeDriver initialization...")
+                    self.driver = webdriver.Chrome(options=chrome_options)
+                elif attempt == 1:
+                    # Try with explicit binary location
+                    logger.info("Trying with explicit Chrome binary location...")
+                    chrome_options.binary_location = "/usr/bin/google-chrome-stable"
+                    self.driver = webdriver.Chrome(options=chrome_options)
+                elif attempt == 2:
+                    # Try with webdriver-manager
+                    logger.info("Trying with webdriver-manager...")
+                    from selenium.webdriver.chrome.service import Service
+                    from webdriver_manager.chrome import ChromeDriverManager
+                    service = Service(ChromeDriverManager().install())
                     self.driver = webdriver.Chrome(service=service, options=chrome_options)
-                    logger.info("✅ Chrome driver successfully initialized with direct path")
-                    return self.driver
-                except Exception as e3:
-                    logger.error(f"❌ All initialization methods failed: {e3}")
-                    logger.error("Please make sure Chrome is installed on this system.")
-                    raise Exception("Failed to initialize Chrome driver after multiple attempts")
+                elif attempt == 3:
+                    # Try with undetected-chromedriver
+                    logger.info("Trying with undetected-chromedriver...")
+                    import undetected_chromedriver as uc
+                    self.driver = uc.Chrome(headless=True, options=chrome_options)
+                elif attempt == 4:
+                    # Last resort: try remote debugging approach
+                    logger.info("Trying with remote debugging port approach...")
+                    import subprocess
+                    import time
+                    
+                    # Start Chrome in background with remote debugging
+                    debug_port = 9222
+                    chrome_cmd = [
+                        "/usr/bin/google-chrome-stable",
+                        f"--remote-debugging-port={debug_port}",
+                        "--headless",
+                        "--no-sandbox",
+                        "--disable-gpu"
+                    ]
+                    chrome_process = subprocess.Popen(chrome_cmd)
+                    time.sleep(3)
+                    
+                    # Connect to the running Chrome instance
+                    from selenium.webdriver.chrome.options import Options
+                    chrome_options = Options()
+                    chrome_options.add_experimental_option("debuggerAddress", f"127.0.0.1:{debug_port}")
+                    self.driver = webdriver.Chrome(options=chrome_options)
+                
+                logger.info("✅ Chrome driver successfully initialized!")
+                
+                # Log driver capabilities for debugging
+                try:
+                    caps = self.driver.capabilities
+                    browser_name = caps.get('browserName', 'unknown')
+                    browser_version = caps.get('browserVersion', 'unknown')
+                    logger.info(f"Browser: {browser_name} {browser_version}")
+                except:
+                    pass
+                    
+                # Apply timeouts
+                self.apply_timeouts()
+                return self.driver
+                
+            except Exception as e:
+                logger.warning(f"⚠️ Driver initialization attempt {attempt+1} failed: {e}")
+                if hasattr(self, 'driver') and self.driver:
+                    try:
+                        self.driver.quit()
+                    except:
+                        pass
+                    self.driver = None
+                
+                # Short delay before next attempt
+                time.sleep(2)
+        
+        # If we get here, all attempts failed
+        logger.error("❌ ALL DRIVER INITIALIZATION ATTEMPTS FAILED")
+        raise Exception("Failed to initialize Chrome driver after multiple strategies")
 
     def ensure_login(self):
         """Login if not already logged in, or reuse existing session"""
@@ -245,198 +359,463 @@ class SRMScraper:
             return None
 
     def login(self):
-        """Log in to SRM Academia portal with enhanced retry logic for Render"""
-        try:
-            self.driver.get(LOGIN_URL)
-            wait = WebDriverWait(self.driver, 30)
+        """Ultra-robust login with multiple fallback strategies"""
+        logger.info(f"Attempting login for user: {self.email}")
+        
+        # Track various metrics for debugging
+        metrics = {
+            "attempts": 0,
+            "page_loads": 0,
+            "iframe_attempts": 0,
+            "login_form_attempts": 0
+        }
+        
+        # We'll try the entire login process up to 3 times
+        for login_attempt in range(3):
+            metrics["attempts"] += 1
+            logger.info(f"🔄 Login attempt {login_attempt+1}/3")
             
-            # Try multiple iframe selection strategies
-            iframe_switch_success = False
-            
-            # Strategy 1: Try the original signinFrame ID
-            iframe_switch_success = self.switch_to_iframe_safely((By.ID, "signinFrame"), max_attempts=2, wait_time=10)
-            
-            # Strategy 2: If Strategy 1 fails, try the previewIframe
-            if not iframe_switch_success:
-                logger.info("Trying alternative iframe strategy: previewIframe")
-                iframe_switch_success = self.switch_to_iframe_safely((By.NAME, "previewIframe"), max_attempts=2, wait_time=10)
-            
-            # Strategy 3: If Strategy 2 fails, try the wmspconnect iframe
-            if not iframe_switch_success:
-                logger.info("Trying alternative iframe strategy: wmspconnect")
-                iframe_switch_success = self.switch_to_iframe_safely((By.NAME, "wmspconnect"), max_attempts=2, wait_time=10)
-            
-            # Strategy 4: If all specific strategies fail, try the first iframe on the page
-            if not iframe_switch_success:
-                logger.info("Trying last resort iframe strategy: first iframe on page")
-                # Wait for at least one iframe to appear
-                WebDriverWait(self.driver, 15).until(
-                    lambda d: len(d.find_elements(By.TAG_NAME, "iframe")) > 0
-                )
-                # Switch to the first iframe
-                iframes = self.driver.find_elements(By.TAG_NAME, "iframe")
-                if iframes:
+            try:
+                # 1. Load the login page with retry logic
+                page_loaded = False
+                for page_attempt in range(3):
+                    metrics["page_loads"] += 1
                     try:
-                        self.driver.switch_to.frame(iframes[0])
-                        logger.info("✅ Successfully switched to first iframe on page")
-                        iframe_switch_success = True
-                    except Exception as e:
-                        logger.warning(f"⚠️ Failed to switch to first iframe: {e}")
-            
-            if not iframe_switch_success:
-                logger.error("Failed to switch to any login iframe after multiple strategies")
-                return False
-            
-            # Find login elements flexibly
-            email_field, next_btn = self.find_login_elements()
-            if not email_field or not next_btn:
-                logger.error("Could not find login elements after switching to iframe")
-                return False
-
-            # Enter email
-            try:
-                email_field.clear()
-                time.sleep(0.5)
-                email_field.send_keys(self.email)
-                logger.info(f"Entered email: {self.email}")
-            except Exception as e:
-                logger.error(f"Failed to enter email: {e}")
-                return False
-
-            # Click Next/Login button
-            try:
-                self.driver.execute_script("arguments[0].click();", next_btn)  # JavaScript click
-                logger.info("Clicked Next/Login button")
-            except Exception as e:
-                logger.error(f"Failed to click Next/Login button: {e}")
-                return False
-
-            # ===== Critical Fix: Wait longer and switch iframe context if needed =====
-            # Wait longer for the page transition to complete
-            time.sleep(2)  # Increase from 2s to 5s
-            
-            # Check if we need to switch to iframe again
-            try:
-                # First check if we're already in the correct context
-                password_field = self.driver.find_element(By.ID, "password")
-            except:
-                # If not, try to switch back to default and then to iframe again
-                logger.info("Switching iframe context for password field")
-                self.driver.switch_to.default_content()
-                wait.until(EC.frame_to_be_available_and_switch_to_it((By.ID, "signinFrame")))
-            
-            # Enter password with retry - now with better iframe handling
-            for attempt in range(3):
-                try:
-                    # Wait explicitly for password field to be visible and interactable
-                    password_field = wait.until(
-                        EC.element_to_be_clickable((By.ID, "password"))
-                    )
-                    time.sleep(1)  # Small delay for stability
-                    password_field.clear()  # Clear first
-                    time.sleep(0.5)
-                    password_field.send_keys(self.password)
-                    logger.info("Entered password")
-                    break
-                except Exception as e:
-                    logger.warning(f"⚠️ Attempt {attempt+1} to enter password failed: {e}")
-                    if attempt == 2:  # Last attempt failed
-                        # Try one more approach - use JavaScript to set the value
+                        logger.info(f"Loading login page (attempt {page_attempt+1}/3)")
+                        self.driver.get(LOGIN_URL)
+                        
+                        # Wait for page to load
+                        WebDriverWait(self.driver, 20).until(
+                            lambda d: d.execute_script('return document.readyState') == 'complete'
+                        )
+                        
+                        # Take screenshot for debugging
                         try:
-                            logger.info("Trying JavaScript approach to enter password")
-                            self.driver.execute_script(
-                                'document.getElementById("password").value = arguments[0]', 
-                                self.password
-                            )
-                            logger.info("Entered password via JavaScript")
-                        except Exception as js_error:
-                            logger.error(f"JavaScript password entry also failed: {js_error}")
-                            raise
-                    time.sleep(2)  # Increased wait between attempts
-
-            # Click Sign In button with retry
-            for attempt in range(3):
-                try:
-                    sign_in_btn = wait.until(EC.element_to_be_clickable((By.ID, "nextbtn")))
-                    self.driver.execute_script("arguments[0].click();", sign_in_btn)  # JavaScript click
-                    logger.info("Clicked Sign In")
-                    break
-                except Exception as e:
-                    logger.warning(f"⚠️ Attempt {attempt+1} to click Sign In failed: {e}")
-                    if attempt == 2:  # Last attempt failed
-                        raise
-                    time.sleep(2)
-
-            time.sleep(3)
-            
-            # Switch back to default content
-            self.driver.switch_to.default_content()
-            
-            # Verify login success
-            if BASE_URL in self.driver.current_url:
-                try:
-                    WebDriverWait(self.driver, 5).until(
-                        EC.presence_of_element_located((By.XPATH, "//a[contains(@href, 'My_Attendance')]"))
-                    )
-                    logger.info("✅ Login verified with dashboard elements")
+                            self.driver.save_screenshot(f"/tmp/login_page_{login_attempt}_{page_attempt}.png")
+                            logger.info(f"Screenshot saved of login page")
+                        except Exception as ss_err:
+                            logger.warning(f"Failed to save login page screenshot: {ss_err}")
+                        
+                        # Verify we have loaded something reasonable
+                        if "SRM" in self.driver.title or "academia" in self.driver.current_url.lower():
+                            logger.info("✅ Login page loaded successfully")
+                            page_loaded = True
+                            break
+                        else:
+                            logger.warning(f"⚠️ Page loaded but may not be correct login page. Title: {self.driver.title}")
+                            # Continue anyway, maybe it's still workable
+                            page_loaded = True
+                            break
+                            
+                    except Exception as e:
+                        logger.warning(f"⚠️ Failed to load login page on attempt {page_attempt+1}: {e}")
+                        time.sleep(3)
+                
+                if not page_loaded:
+                    logger.error("❌ Failed to load login page after multiple attempts")
+                    continue  # Try the entire login process again
+                
+                # 2. Advanced iframe handling with multiple strategies
+                iframe_strategies = [
+                    {"name": "signinFrame", "by": By.ID, "value": "signinFrame"},
+                    {"name": "previewIframe", "by": By.NAME, "value": "previewIframe"},
+                    {"name": "wmspconnect", "by": By.NAME, "value": "wmspconnect"},
+                    {"name": "any iframe", "by": None, "value": None},
+                ]
+                
+                iframe_success = False
+                for strategy in iframe_strategies:
+                    metrics["iframe_attempts"] += 1
                     
-                    # Extract cookies after successful login
-                    try:
-                        cookies = self.driver.get_cookies()
-                        cookie_dict = {cookie['name']: cookie['value'] for cookie in cookies}
-                        logger.info(f"✅ Extracted {len(cookie_dict)} cookies: {list(cookie_dict.keys())}")
-                        
-                        # Generate JWT token
-                        token = self.create_jwt_token(self.email)
-                        if not token:
-                            raise Exception("Failed to generate JWT token")
-                        
-                        # Save cookies and token to file for debugging
-                        debug_data = {
-                            'cookies': cookie_dict,
-                            'token': token
-                        }
-                        with open('debug_cookies.json', 'w') as f:
-                            json.dump(debug_data, f)
-                        logger.info("✅ Saved cookies and token to debug file")
-                        
-                        # Store cookies and token in Supabase
+                    if strategy["by"] is None:
+                        # This is the "any iframe" strategy
+                        logger.info("Trying to find ANY iframe on the page...")
                         try:
-                            cookie_data = {
-                                'email': self.email,
-                                'cookies': cookie_dict,
-                                'token': token,
-                                'updated_at': datetime.now().isoformat()
-                            }
+                            # Wait for at least one iframe to be present
+                            WebDriverWait(self.driver, 10).until(
+                                lambda d: len(d.find_elements(By.TAG_NAME, "iframe")) > 0
+                            )
                             
-                            # Delete old record first
-                            supabase.table('user_cookies').delete().eq('email', self.email).execute()
-                            logger.info("✅ Deleted old cookie record")
+                            # Get all iframes
+                            iframes = self.driver.find_elements(By.TAG_NAME, "iframe")
+                            logger.info(f"Found {len(iframes)} iframe(s)")
                             
-                            # Insert new record
-                            result = supabase.table('user_cookies').insert(cookie_data).execute()
-                            logger.info("✅ Stored new cookie record with token")
+                            # Try each iframe in order
+                            for i, frame in enumerate(iframes):
+                                try:
+                                    # Switch to this iframe
+                                    self.driver.switch_to.frame(frame)
+                                    logger.info(f"✅ Successfully switched to iframe #{i+1}")
+                                    
+                                    # See if this iframe has any login-like elements
+                                    login_elements = len(self.driver.find_elements(By.CSS_SELECTOR, 
+                                        "input[type='text'], input[type='email'], input[type='password'], button[type='submit']"))
+                                    
+                                    if login_elements > 0:
+                                        logger.info(f"✅ Iframe #{i+1} contains {login_elements} potential login elements")
+                                        iframe_success = True
+                                        break
+                                    else:
+                                        logger.info(f"Iframe #{i+1} doesn't contain login elements, trying next iframe")
+                                        self.driver.switch_to.default_content()
+                                except Exception as iframe_err:
+                                    logger.warning(f"Error switching to iframe #{i+1}: {iframe_err}")
+                                    self.driver.switch_to.default_content()
                             
+                            if iframe_success:
+                                break
                         except Exception as e:
-                            logger.error(f"❌ Failed to store cookies and token in Supabase: {e}")
+                            logger.warning(f"Error in 'any iframe' strategy: {e}")
+                    
+                    else:
+                        # This is a specific iframe strategy
+                        logger.info(f"Trying iframe strategy: {strategy['name']}")
+                        iframe_selector = (strategy["by"], strategy["value"])
                         
-                    except Exception as e:
-                        logger.error(f"❌ Failed to extract/store cookies and token: {e}")
+                        if self.switch_to_iframe_safely(iframe_selector, max_attempts=2):
+                            logger.info(f"✅ Successfully switched to {strategy['name']} iframe")
+                            iframe_success = True
+                            break
+                
+                if not iframe_success:
+                    logger.error("❌ Failed to switch to any suitable iframe")
+                    
+                    # Last resort: try to find login elements on the main page
+                    logger.info("Trying to find login elements on the main page as last resort...")
+                    self.driver.switch_to.default_content()
+                    
+                    login_elements = self.driver.find_elements(By.CSS_SELECTOR, 
+                        "input[type='text'], input[type='email'], input[type='password'], button[type='submit']")
+                    
+                    if len(login_elements) > 0:
+                        logger.info(f"Found {len(login_elements)} potential login elements on main page")
+                        iframe_success = True
+                    else:
+                        # Try the entire login process again
+                        continue
+                
+                # 3. Super-flexible login form handling
+                wait = WebDriverWait(self.driver, 10)
+                
+                # First, analyze the page to find the best login strategy
+                login_form_found = False
+                login_strategy = "unknown"
+                
+                # Collect all potential login-related elements
+                metrics["login_form_attempts"] += 1
+                inputs = self.driver.find_elements(By.TAG_NAME, "input")
+                buttons = self.driver.find_elements(By.TAG_NAME, "button")
+                
+                # Look for visible text input fields (likely username/email)
+                text_inputs = [inp for inp in inputs if inp.get_attribute("type") in ["text", "email"] and self.is_element_visible(inp)]
+                
+                # Look for visible password fields
+                password_inputs = [inp for inp in inputs if inp.get_attribute("type") == "password" and self.is_element_visible(inp)]
+                
+                # Look for visible submit buttons
+                submit_buttons = [btn for btn in buttons if (btn.get_attribute("type") == "submit" or 
+                                                         "login" in btn.text.lower() or 
+                                                         "next" in btn.text.lower() or 
+                                                         "sign" in btn.text.lower()) and 
+                                                        self.is_element_visible(btn)]
+                
+                # Determine the login strategy based on visible elements
+                if len(text_inputs) > 0 and len(password_inputs) > 0 and len(submit_buttons) > 0:
+                    login_strategy = "single-step"
+                    login_form_found = True
+                    logger.info("Detected single-step login form (username + password)")
+                elif len(text_inputs) > 0 and len(submit_buttons) > 0:
+                    login_strategy = "two-step"
+                    login_form_found = True
+                    logger.info("Detected two-step login form (username first, then password)")
+                else:
+                    logger.warning("Could not determine login form strategy from visible elements")
+                    
+                if not login_form_found:
+                    # Try with the find_login_elements method as fallback
+                    logger.info("Using fallback method to find login elements")
+                    email_field, next_btn = self.find_login_elements()
+                    if email_field and next_btn:
+                        login_form_found = True
+                        login_strategy = "fallback"
+                        logger.info("Found login elements with fallback method")
+                        text_inputs = [email_field]
+                        submit_buttons = [next_btn]
+                
+                if not login_form_found:
+                    logger.error("❌ Could not find any usable login form")
+                    # Take a full screenshot for debugging
+                    try:
+                        self.driver.save_screenshot(f"/tmp/failed_login_form_{login_attempt}.png")
+                        logger.info("Screenshot saved of failed login form detection")
+                    except Exception as ss_err:
+                        logger.warning(f"Failed to save login form screenshot: {ss_err}")
+                        
+                    # Try again with the entire login process
+                    continue
+                
+                # Now perform the actual login based on the detected strategy
+                try:
+                    if login_strategy == "single-step":
+                        # Enter username/email
+                        text_inputs[0].clear()
+                        time.sleep(0.5)
+                        text_inputs[0].send_keys(self.email)
+                        logger.info(f"Entered email: {self.email}")
+                        
+                        # Enter password
+                        password_inputs[0].clear()
+                        time.sleep(0.5)
+                        password_inputs[0].send_keys(self.password)
+                        logger.info("Entered password")
+                        
+                        # Click submit
+                        submit_buttons[0].click()
+                        logger.info("Clicked submit button")
+                        
+                    elif login_strategy == "two-step" or login_strategy == "fallback":
+                        # Enter username/email
+                        text_inputs[0].clear()
+                        time.sleep(0.5)
+                        text_inputs[0].send_keys(self.email)
+                        logger.info(f"Entered email: {self.email}")
+                        
+                        # Click next/submit
+                        self.click_element_safely(submit_buttons[0])
+                        logger.info("Clicked next button")
+                        
+                        # Now look for password field (should appear after clicking next)
+                        time.sleep(3)  # Wait for transition
+                        
+                        # Try to find password field
+                        password_field = None
+                        for find_attempt in range(3):
+                            try:
+                                # First check if we need to switch iframe context again
+                                try:
+                                    password_field = self.driver.find_element(By.ID, "password")
+                                except:
+                                    logger.info("Password field not found directly, checking iframe context")
+                                    # Maybe we're back to default content or in a different iframe
+                                    self.driver.switch_to.default_content()
+                                    
+                                    # Look for iframe again
+                                    for strategy in iframe_strategies:
+                                        if strategy["by"] is not None:
+                                            iframe_selector = (strategy["by"], strategy["value"])
+                                            if self.switch_to_iframe_safely(iframe_selector, max_attempts=1):
+                                                logger.info(f"Switched to {strategy['name']} iframe for password field")
+                                                break
+                                
+                                # Look for password field again with multiple selectors
+                                for selector in [
+                                    (By.ID, "password"),
+                                    (By.NAME, "password"),
+                                    (By.CSS_SELECTOR, "input[type='password']")
+                                ]:
+                                    try:
+                                        password_field = wait.until(EC.element_to_be_clickable(selector))
+                                        logger.info(f"Found password field with selector: {selector}")
+                                        break
+                                    except:
+                                        continue
+                                
+                                if password_field:
+                                    break
+                                    
+                            except Exception as pw_err:
+                                logger.warning(f"Error finding password field (attempt {find_attempt+1}): {pw_err}")
+                                time.sleep(2)
+                        
+                        if not password_field:
+                            logger.error("❌ Could not find password field after clicking next")
+                            
+                            # Take screenshot for debugging
+                            try:
+                                self.driver.save_screenshot(f"/tmp/password_field_not_found_{login_attempt}.png")
+                            except:
+                                pass
+                                
+                            # Try the entire login process again
+                            continue
+                        
+                        # Enter password
+                        try:
+                            password_field.clear()
+                            time.sleep(0.5)
+                            password_field.send_keys(self.password)
+                            logger.info("Entered password")
+                        except Exception as pw_entry_err:
+                            logger.warning(f"Error entering password: {pw_entry_err}")
+                            # Try JavaScript as fallback
+                            try:
+                                self.driver.execute_script(
+                                    'arguments[0].value = arguments[1]', 
+                                    password_field, self.password
+                                )
+                                logger.info("Entered password via JavaScript")
+                            except Exception as js_err:
+                                logger.error(f"Failed to enter password via JavaScript: {js_err}")
+                                continue
+                        
+                        # Find and click Sign In button
+                        sign_in_button = None
+                        for selector in [
+                            (By.ID, "nextbtn"),
+                            (By.CSS_SELECTOR, "button[type='submit']"),
+                            (By.XPATH, "//button[contains(text(), 'Sign')]"),
+                            (By.XPATH, "//button[contains(text(), 'Login')]"),
+                            (By.XPATH, "//input[@type='submit']"),
+                        ]:
+                            try:
+                                sign_in_button = wait.until(EC.element_to_be_clickable(selector))
+                                logger.info(f"Found sign in button with selector: {selector}")
+                                break
+                            except:
+                                continue
+                        
+                        if not sign_in_button:
+                            logger.error("❌ Could not find sign in button")
+                            continue
+                        
+                        # Click sign in button
+                        self.click_element_safely(sign_in_button)
+                        logger.info("Clicked sign in button")
+                
+                except Exception as login_err:
+                    logger.error(f"❌ Error during login form submission: {login_err}")
+                    continue
+                
+                # 4. Verify login success with multiple indicators
+                time.sleep(5)  # Wait for login to complete
+                
+                # Switch back to default content
+                self.driver.switch_to.default_content()
+                
+                # Take screenshot for debugging
+                try:
+                    self.driver.save_screenshot(f"/tmp/post_login_{login_attempt}.png")
+                    logger.info("Screenshot saved of post-login page")
+                except Exception as ss_err:
+                    logger.warning(f"Failed to save post-login screenshot: {ss_err}")
+                
+                # Check for login success indicators
+                login_successful = False
+                
+                # Strategy 1: Check URL
+                if BASE_URL in self.driver.current_url and "login" not in self.driver.current_url.lower():
+                    logger.info("URL indicates successful login")
+                    login_successful = True
+                
+                # Strategy 2: Check for dashboard elements
+                if not login_successful:
+                    try:
+                        dashboard_elements = self.driver.find_elements(By.XPATH, 
+                                                                   "//a[contains(@href, 'My_Attendance') or contains(@href, 'Dashboard')]")
+                        if dashboard_elements:
+                            logger.info(f"Found {len(dashboard_elements)} dashboard elements")
+                            login_successful = True
+                    except:
+                        pass
+                
+                # Strategy 3: Check for user-specific content
+                if not login_successful:
+                    page_source = self.driver.page_source.lower()
+                    if "log out" in page_source or "sign out" in page_source or "logout" in page_source or "signout" in page_source:
+                        logger.info("Found logout option, indicating successful login")
+                        login_successful = True
+                
+                if login_successful:
+                    logger.info("✅ Login verified as successful")
+                    
+                    # Extract cookies with retry
+                    cookies_extracted = False
+                    for cookie_attempt in range(3):
+                        try:
+                            cookies = self.driver.get_cookies()
+                            cookie_dict = {cookie['name']: cookie['value'] for cookie in cookies}
+                            logger.info(f"✅ Extracted {len(cookie_dict)} cookies: {list(cookie_dict.keys())}")
+                            
+                            # Generate JWT token
+                            token = self.create_jwt_token(self.email)
+                            if not token:
+                                raise Exception("Failed to generate JWT token")
+                            
+                            # Save to Supabase with robust retry
+                            for db_attempt in range(3):
+                                try:
+                                    cookie_data = {
+                                        'email': self.email,
+                                        'cookies': cookie_dict,
+                                        'token': token,
+                                        'updated_at': datetime.now().isoformat()
+                                    }
+                                    
+                                    # Delete old record first
+                                    supabase.table('user_cookies').delete().eq('email', self.email).execute()
+                                    logger.info("✅ Deleted old cookie record")
+                                    
+                                    # Insert new record
+                                    result = supabase.table('user_cookies').insert(cookie_data).execute()
+                                    logger.info("✅ Stored new cookie record with token")
+                                    cookies_extracted = True
+                                    break
+                                except Exception as db_err:
+                                    logger.warning(f"Error saving cookies to database (attempt {db_attempt+1}): {db_err}")
+                                    time.sleep(2)
+                            
+                            if cookies_extracted:
+                                break
+                        except Exception as cookie_err:
+                            logger.warning(f"Error extracting cookies (attempt {cookie_attempt+1}): {cookie_err}")
+                            time.sleep(2)
                     
                     self.is_logged_in = True
+                    
+                    # Log metrics for debugging
+                    logger.info(f"Login success metrics: {metrics}")
+                    
                     return True
-                except:
-                    logger.warning("⚠️ Login appears successful but dashboard elements not found")
-                
-                self.is_logged_in = True
-                return True
-            else:
-                logger.error("Login failed, check credentials or CAPTCHA")
-                return False
-                
-        except Exception as e:
-            logger.error(f"Error during login: {e}")
+                else:
+                    logger.warning("⚠️ Login verification failed, will retry")
+                    
+            except Exception as e:
+                logger.error(f"❌ Exception during login attempt {login_attempt+1}: {e}")
+                traceback.print_exc()
+        
+        # If we get here, all login attempts failed
+        logger.error(f"❌ ALL LOGIN ATTEMPTS FAILED. Metrics: {metrics}")
+        return False
+
+    def is_element_visible(self, element):
+        """Check if an element is visible on the page"""
+        try:
+            return element.is_displayed() and element.size['height'] > 0 and element.size['width'] > 0
+        except:
             return False
+
+    def click_element_safely(self, element):
+        """Try multiple methods to click an element"""
+        try:
+            # Try standard click first
+            element.click()
+            return True
+        except Exception as e:
+            logger.warning(f"Standard click failed: {e}, trying JavaScript click")
+            try:
+                # Try JavaScript click
+                self.driver.execute_script("arguments[0].click();", element)
+                return True
+            except Exception as js_err:
+                logger.warning(f"JavaScript click failed: {js_err}, trying ActionChains")
+                try:
+                    # Try ActionChains
+                    from selenium.webdriver.common.action_chains import ActionChains
+                    ActionChains(self.driver).move_to_element(element).click().perform()
+                    return True
+                except Exception as ac_err:
+                    logger.error(f"All click methods failed: {ac_err}")
+                    return False
 
     def get_attendance_page(self):
         """Navigate to attendance page and get HTML with better load detection"""
@@ -505,124 +884,360 @@ class SRMScraper:
                 registration_number = match.group(0)
         return registration_number
 
-    def get_user_id(self, registration_number):
-        """Get or create user ID in Supabase"""
-        try:
-            resp = supabase.table("users").select("id, registration_number").eq("email", self.email).single().execute()
-            user = resp.data
-            if user:
-                # If user has no registration_number or it's different, update it.
-                if not user["registration_number"] or user["registration_number"] != registration_number:
-                    supabase.table("users").update({"registration_number": registration_number}).eq("id", user["id"]).execute()
-                return user["id"]
-        except Exception as e:
-            logger.error(f"No existing user found or error looking up user: {e}")
-
-        # If no user found or error, create a new user with a dummy password
-        new_user = {
-            "email": self.email,
-            "registration_number": registration_number,
-            "password_hash": generate_password_hash("dummy_password")
-        }
-        insert_resp = supabase.table("users").insert(new_user).execute()
-        if insert_resp.data:
-            return insert_resp.data[0]["id"]
-        else:
-            logger.error(f"Error inserting user: {insert_resp.error}")
-            return None
-
-    def parse_and_save_attendance(self, html, driver):
-        """Parse attendance data and save to Supabase"""
-        try:
-            logger.info("Parsing and saving attendance data...")
-            soup = BeautifulSoup(html, "html.parser")
-            registration_number = self.extract_registration_number(soup)
-            if not registration_number:
-                logger.error("Could not find Registration Number!")
-                return False
-            logger.info(f"Extracted Registration Number: {registration_number}")
-
-            # Get or create the user in Supabase
-            user_id = self.get_user_id(registration_number)
-            if not user_id:
-                logger.error("Could not retrieve or create user in Supabase.")
-                return False
-
-            # Extract all attendance tables from the page
-            attendance_tables = [table for table in soup.find_all("table") if "Course Code" in table.text]
-            if not attendance_tables:
-                logger.error("No attendance table found!")
-                return False
-
-            # Collect attendance records from all tables
-            attendance_records = []
-            for attendance_table in attendance_tables:
-                rows = attendance_table.find_all("tr")[1:]  # skip header row
-                for row in rows:
-                    cols = row.find_all("td")
-                    if len(cols) >= 8:
+    def get_user_id_robust(self, registration_number):
+        """Get or create user ID in Supabase with robust error handling"""
+        max_attempts = 3
+        backoff_factor = 2  # Exponential backoff
+        
+        for attempt in range(max_attempts):
+            try:
+                # First try to get the user by email
+                logger.info(f"Looking up user by email: {self.email}")
+                resp = supabase.table("users").select("id, registration_number").eq("email", self.email).single().execute()
+                user = resp.data
+                
+                if user:
+                    # User exists - check if we need to update registration number
+                    if registration_number and (not user.get("registration_number") or 
+                                              user.get("registration_number") != registration_number):
+                        logger.info(f"Updating registration number for existing user: {registration_number}")
                         try:
-                            record = {
-                                "course_code": cols[0].text.strip(),
-                                "course_title": cols[1].text.strip(),
-                                "category": cols[2].text.strip(),
-                                "faculty": cols[3].text.strip(),
-                                "slot": cols[4].text.strip(),
-                                "hours_conducted": int(cols[5].text.strip()) if cols[5].text.strip().isdigit() else 0,
-                                "hours_absent": int(cols[6].text.strip()) if cols[6].text.strip().isdigit() else 0,
-                                "attendance_percentage": float(cols[7].text.strip()) if cols[7].text.strip().replace('.', '', 1).isdigit() else 0.0
-                            }
-                            attendance_records.append(record)
-                        except Exception as ex:
-                            logger.warning(f"Error parsing row: {ex}")
+                            supabase.table("users").update({"registration_number": registration_number})\
+                                .eq("id", user["id"]).execute()
+                        except Exception as update_err:
+                            logger.warning(f"Failed to update registration number, but continuing: {update_err}")
+                    
+                    logger.info(f"✅ Found existing user with ID: {user['id']}")
+                    return user["id"]
+                
+                # If no user found, try looking up by registration number as fallback
+                if registration_number:
+                    logger.info(f"Looking up user by registration number: {registration_number}")
+                    try:
+                        reg_resp = supabase.table("users").select("id")\
+                            .eq("registration_number", registration_number).execute()
+                        
+                        if reg_resp.data and len(reg_resp.data) > 0:
+                            user_id = reg_resp.data[0]["id"]
+                            logger.info(f"✅ Found user by registration number with ID: {user_id}")
+                            
+                            # Update the email field to match current email
+                            try:
+                                supabase.table("users").update({"email": self.email})\
+                                    .eq("id", user_id).execute()
+                                logger.info(f"Updated email for user {user_id}")
+                            except Exception as email_err:
+                                logger.warning(f"Failed to update email, but continuing: {email_err}")
+                                
+                            return user_id
+                    except Exception as reg_err:
+                        logger.warning(f"Error looking up by registration: {reg_err}, will create new user")
+                
+                # Create a new user with the available information
+                logger.info("Creating new user")
+                new_user = {
+                    "email": self.email,
+                    "registration_number": registration_number or "",
+                    "password_hash": generate_password_hash("temporary_password_" + str(int(time.time()))),
+                    "created_at": datetime.now().isoformat()
+                }
+                
+                insert_resp = supabase.table("users").insert(new_user).execute()
+                if insert_resp.data and len(insert_resp.data) > 0:
+                    user_id = insert_resp.data[0]["id"]
+                    logger.info(f"✅ Created new user with ID: {user_id}")
+                    return user_id
+                else:
+                    raise Exception("Insert returned no data")
+                
+            except Exception as e:
+                wait_time = backoff_factor ** attempt
+                logger.warning(f"Database operation failed (attempt {attempt+1}/{max_attempts}): {e}")
+                logger.info(f"Retrying in {wait_time} seconds...")
+                time.sleep(wait_time)
+        
+        # If we get here, all attempts failed
+        logger.error("❌ All attempts to get/create user failed")
+        
+        # Last resort fallback: generate a temporary user ID
+        # This allows the scraper to continue even if the database is unavailable
+        import hashlib
+        fallback_id = hashlib.md5(self.email.encode()).hexdigest()
+        logger.warning(f"Using fallback user ID mechanism: {fallback_id}")
+        return fallback_id
 
-            # Optional: Deduplicate records if needed
-            unique_records = {}
-            for rec in attendance_records:
-                key = (registration_number, rec["course_code"], rec["category"])
-                if key not in unique_records:
-                    unique_records[key] = rec
-            attendance_records = list(unique_records.values())
-            logger.info(f"Parsed {len(attendance_records)} unique attendance records.")
-
-            # Build the JSON object for all attendance data
+    def parse_and_save_attendance_robust(self, html, user_id):
+        """Parse attendance data and save to Supabase with robust error handling"""
+        try:
+            logger.info("Parsing and saving attendance data with enhanced robustness...")
+            
+            # Parse HTML with defense against malformed content
+            try:
+                soup = BeautifulSoup(html, "html.parser")
+            except Exception as parse_err:
+                logger.error(f"BeautifulSoup parsing failed: {parse_err}")
+                # Try a more lenient parser
+                soup = BeautifulSoup(html, "html5lib")
+            
+            # ===== Multi-strategy attendance table extraction =====
+            attendance_tables = []
+            
+            # Strategy 1: Look for tables containing "Course Code"
+            logger.info("Trying to find attendance tables containing 'Course Code'")
+            tables_1 = [table for table in soup.find_all("table") if "Course Code" in table.text]
+            if tables_1:
+                logger.info(f"Found {len(tables_1)} attendance tables using Strategy 1")
+                attendance_tables.extend(tables_1)
+            
+            # Strategy 2: Look for tables with specific structure
+            if not attendance_tables:
+                logger.info("Trying to find attendance tables with attendance structure")
+                for table in soup.find_all("table"):
+                    # Check header row for attendance-related columns
+                    header_row = table.find("tr")
+                    if not header_row:
+                        continue
+                    
+                    header_cells = header_row.find_all(["th", "td"])
+                    header_text = " ".join([cell.get_text() for cell in header_cells]).lower()
+                    
+                    if "attendance" in header_text and ("course" in header_text or "subject" in header_text):
+                        attendance_tables.append(table)
+                        
+                if attendance_tables:
+                    logger.info(f"Found {len(attendance_tables)} attendance tables using Strategy 2")
+            
+            # Strategy 3: Look for any tables near "Attendance" text
+            if not attendance_tables:
+                logger.info("Trying to find attendance tables by proximity to 'Attendance' text")
+                attendance_heading = soup.find(string=lambda s: s and "Attendance" in s)
+                if attendance_heading:
+                    parent = attendance_heading.parent
+                    # Look for the nearest table within 5 levels up
+                    for i in range(5):
+                        if not parent:
+                            break
+                        table = parent.find("table")
+                        if table:
+                            attendance_tables.append(table)
+                            break
+                        parent = parent.parent
+                        
+                if attendance_tables:
+                    logger.info(f"Found {len(attendance_tables)} attendance tables using Strategy 3")
+            
+            # If no tables found, check if we can proceed with other sections
+            if not attendance_tables:
+                logger.error("No attendance tables found in the HTML!")
+                # Save empty attendance data as placeholder
+                empty_attendance = {
+                    "registration_number": "Unknown",
+                    "last_updated": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+                    "records": []
+                }
+                
+                self.upsert_attendance_data(user_id, empty_attendance)
+                return False
+            
+            # ===== Multi-strategy attendance record extraction =====
+            logger.info(f"Processing {len(attendance_tables)} attendance tables")
+            attendance_records = []
+            
+            for table_idx, attendance_table in enumerate(attendance_tables):
+                logger.info(f"Processing attendance table {table_idx+1}")
+                
+                # Try to determine header row and column mapping
+                header_row = attendance_table.find("tr")
+                if not header_row:
+                    logger.warning(f"Table {table_idx+1}: No header row found, skipping")
+                    continue
+                
+                header_cells = header_row.find_all(["th", "td"])
+                headers = [cell.get_text(strip=True).lower() for cell in header_cells]
+                
+                # Try to map column indices to standard field names
+                col_map = {}
+                for i, header in enumerate(headers):
+                    if "course code" in header or "subject code" in header:
+                        col_map["course_code"] = i
+                    elif "course title" in header or "subject name" in header or "course name" in header:
+                        col_map["course_title"] = i
+                    elif "category" in header:
+                        col_map["category"] = i
+                    elif "faculty" in header or "teacher" in header or "instructor" in header:
+                        col_map["faculty"] = i
+                    elif "slot" in header or "period" in header or "time" in header:
+                        col_map["slot"] = i
+                    elif "conducted" in header:
+                        col_map["hours_conducted"] = i
+                    elif "absent" in header:
+                        col_map["hours_absent"] = i
+                    elif "attendance" in header and "percentage" in header:
+                        col_map["attendance_percentage"] = i
+                
+                # Skip table if we couldn't map essential columns
+                essential_cols = ["course_code", "course_title"]
+                missing_cols = [col for col in essential_cols if col not in col_map]
+                if missing_cols:
+                    logger.warning(f"Table {table_idx+1}: Missing essential columns: {missing_cols}, skipping")
+                    continue
+                
+                # Process data rows
+                data_rows = attendance_table.find_all("tr")[1:]  # skip header row
+                for row_idx, row in enumerate(data_rows):
+                    cells = row.find_all("td")
+                    
+                    # Skip rows with too few cells
+                    min_cells_needed = max(col_map.values()) + 1
+                    if len(cells) < min_cells_needed:
+                        logger.warning(f"Table {table_idx+1}, Row {row_idx+1}: Not enough cells, skipping")
+                        continue
+                    
+                    try:
+                        # Create record with None for missing fields
+                        record = {field: None for field in ["course_code", "course_title", "category", 
+                                                           "faculty", "slot", "hours_conducted", 
+                                                           "hours_absent", "attendance_percentage"]}
+                        
+                        # Fill in mapped fields
+                        for field, col_idx in col_map.items():
+                            if col_idx < len(cells):
+                                cell_text = cells[col_idx].get_text(strip=True)
+                                
+                                # Type conversion for numerical fields
+                                if field == "hours_conducted":
+                                    record[field] = int(cell_text) if cell_text.strip().isdigit() else 0
+                                elif field == "hours_absent":
+                                    record[field] = int(cell_text) if cell_text.strip().isdigit() else 0
+                                elif field == "attendance_percentage":
+                                    record[field] = float(cell_text) if cell_text.strip().replace('.', '', 1).isdigit() else 0.0
+                                else:
+                                    record[field] = cell_text
+                        
+                        # Validate the record
+                        if not record["course_code"] or not record["course_title"]:
+                            logger.warning(f"Table {table_idx+1}, Row {row_idx+1}: Missing course code/title, skipping")
+                            continue
+                            
+                        attendance_records.append(record)
+                        
+                    except Exception as record_error:
+                        logger.warning(f"Error processing row {row_idx+1} in table {table_idx+1}: {record_error}")
+                        continue
+            
+            # Deduplicate records
+            deduplicated_records = {}
+            for record in attendance_records:
+                key = (record["course_code"], record["category"]) if record["category"] else record["course_code"]
+                # Keep the record with the most information
+                if key not in deduplicated_records or self._record_completeness(record) > self._record_completeness(deduplicated_records[key]):
+                    deduplicated_records[key] = record
+            
+            attendance_records = list(deduplicated_records.values())
+            logger.info(f"Extracted {len(attendance_records)} unique attendance records")
+            
+            # If we have no records, check if we should continue
+            if not attendance_records:
+                logger.warning("No attendance records extracted, saving empty data")
+                empty_attendance = {
+                    "registration_number": "Unknown",
+                    "last_updated": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+                    "records": []
+                }
+                
+                self.upsert_attendance_data(user_id, empty_attendance)
+                return False
+            
+            # Construct the full attendance JSON
+            registration_number = self.extract_registration_number_robust(soup) or "Unknown"
             attendance_json = {
                 "registration_number": registration_number,
                 "last_updated": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
                 "records": attendance_records
             }
-
-            # Upsert the JSON object in Supabase
-            try:
-                sel_resp = supabase.table("attendance").select("id").eq("user_id", user_id).execute()
-            except Exception as e:
-                logger.error(f"Database operation timed out or failed: {e}")
-                sel_resp = None
-
-            if sel_resp and sel_resp.data and len(sel_resp.data) > 0:
-                up_resp = supabase.table("attendance").update({
-                    "attendance_data": attendance_json,
-                    "updated_at": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
-                }).eq("user_id", user_id).execute()
-                if up_resp.data:
-                    logger.info("✅ Attendance JSON updated successfully.")
-                else:
-                    logger.error("❌ Failed to update attendance JSON.")
-            else:
-                in_resp = supabase.table("attendance").insert({
-                    "user_id": user_id,
-                    "attendance_data": attendance_json
-                }).execute()
-                if in_resp.data:
-                    logger.info("✅ Attendance JSON inserted successfully.")
-                else:
-                    logger.error("❌ Failed to insert attendance JSON.")
-
-            return True
+            
+            # Save to database with retry
+            return self.upsert_attendance_data(user_id, attendance_json)
             
         except Exception as e:
-            logger.error(f"❌ Error saving attendance data: {e}")
+            logger.error(f"❌ Error in attendance parsing and saving: {e}")
+            traceback.print_exc()
             return False
+
+    def _record_completeness(self, record):
+        """Helper to determine how complete a record is"""
+        completeness = 0
+        for field, value in record.items():
+            if value is not None and value != "":
+                completeness += 1
+        return completeness
+
+    def upsert_attendance_data(self, user_id, attendance_json):
+        """Upsert attendance data with retry logic"""
+        max_attempts = 3
+        
+        for attempt in range(max_attempts):
+            try:
+                logger.info(f"Upserting attendance data (attempt {attempt+1}/{max_attempts})")
+                
+                # First check if record exists
+                try:
+                    sel_resp = supabase.table("attendance").select("id").eq("user_id", user_id).execute()
+                    record_exists = sel_resp.data and len(sel_resp.data) > 0
+                except Exception as sel_err:
+                    logger.warning(f"Error checking for existing record: {sel_err}")
+                    record_exists = False
+                
+                if record_exists:
+                    # Update existing
+                    up_resp = supabase.table("attendance").update({
+                        "attendance_data": attendance_json,
+                        "updated_at": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+                    }).eq("user_id", user_id).execute()
+                    
+                    if up_resp.data and len(up_resp.data) > 0:
+                        logger.info("✅ Attendance data updated successfully")
+                        return True
+                    else:
+                        logger.warning("Update returned empty response, trying insert")
+                        # Fall through to insert
+                
+                # Insert new
+                in_resp = supabase.table("attendance").insert({
+                    "user_id": user_id,
+                    "attendance_data": attendance_json,
+                    "created_at": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+                    "updated_at": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+                }).execute()
+                
+                if in_resp.data and len(in_resp.data) > 0:
+                    logger.info("✅ Attendance data inserted successfully")
+                    return True
+                else:
+                    raise Exception("Insert returned no data")
+                
+            except Exception as e:
+                wait_time = 2 ** attempt  # Exponential backoff
+                logger.warning(f"Database operation failed (attempt {attempt+1}): {e}")
+                
+                if attempt < max_attempts - 1:
+                    logger.info(f"Retrying in {wait_time} seconds...")
+                    time.sleep(wait_time)
+                else:
+                    logger.error("❌ All database save attempts failed")
+                    
+                    # Last resort: save to a local file
+                    try:
+                        backup_file = f"attendance_backup_{user_id}.json"
+                        with open(backup_file, 'w') as f:
+                            json.dump(attendance_json, f)
+                        logger.info(f"✅ Saved attendance data to backup file: {backup_file}")
+                        return True
+                    except Exception as backup_err:
+                        logger.error(f"Even backup file save failed: {backup_err}")
+                        return False
+        
+        return False
 
     def get_course_title(self, course_code, attendance_records):
         """
@@ -661,7 +1276,7 @@ class SRMScraper:
         logger.info(f"Extracted Registration Number (marks): {registration_number}")
         
         # Get or create the user in Supabase
-        user_id = self.get_user_id(registration_number)
+        user_id = self.get_user_id_robust(registration_number)
         if not user_id:
             logger.error("Could not retrieve or create user in Supabase for marks.")
             return False
@@ -1193,48 +1808,229 @@ class SRMScraper:
             return False
 
     def run_timetable_scraper(self):
-        """Public interface to run the timetable scraper"""
-        logger.info("Starting timetable scraper")
-        try:
-            self.setup_driver()
-            success = self.ensure_login()
-            if not success:
-                logger.error("Failed to log in to Academia. Aborting timetable scraping.")
-                return {"status": "error", "message": "Login failed"}
-            
-            # Step 1: Scrape timetable data
-            course_data = self.scrape_timetable()
-            if not course_data:
-                logger.error("Failed to scrape timetable data")
-                return {"status": "error", "message": "Failed to scrape timetable data"}
-            
-            # Step 2: Auto-detect the batch from the page
-            auto_batch = self.parse_batch_number_from_page()
-            logger.info(f"Scraped {len(course_data)} courses from timetable page; detected batch={auto_batch}")
-            
-            # Step 3: Merge timetable with course data
-            merged_result = self.merge_timetable_with_courses(course_data, auto_batch)
-            if merged_result["status"] != "success":
-                self.driver.quit()
-                return merged_result
-            
-            # Step 4: Store timetable data in Supabase
-            store_success = self.store_timetable_in_supabase(merged_result)
-            if not store_success:
-                logger.error("Failed to store timetable in Supabase.")
-            else:
-                logger.info("Timetable stored in Supabase successfully.")
-            
-            self.driver.quit()
-            logger.info("Timetable scraper finished successfully")
-            
-            return merged_result
+        """Public interface to run the timetable scraper with enhanced error handling"""
+        logger.info("Starting timetable scraper with multi-level error recovery")
+        start_time = time.time()
         
+        result = {
+            "status": "error",
+            "message": "Not started",
+            "timetable_data": None,
+            "batch": None,
+            "errors": [],
+            "execution_time": 0
+        }
+        
+        try:
+            # Step 1: Initialize driver
+            try:
+                self.driver = self.setup_driver()
+                if not self.driver:
+                    result["message"] = "Failed to initialize Chrome driver"
+                    return result
+            except Exception as driver_err:
+                result["message"] = f"Driver initialization failed: {str(driver_err)}"
+                result["errors"].append({"phase": "driver_setup", "error": str(driver_err)})
+                return result
+            
+            # Step 2: Login
+            login_success = False
+            max_login_attempts = 3
+            for login_attempt in range(max_login_attempts):
+                try:
+                    logger.info(f"Login attempt {login_attempt+1}/{max_login_attempts}")
+                    login_success = self.ensure_login()
+                    if login_success:
+                        logger.info("✅ Login successful for timetable scraper")
+                        break
+                    else:
+                        logger.warning(f"Login attempt {login_attempt+1} failed")
+                        if login_attempt < max_login_attempts - 1:
+                            logger.info("Retrying login...")
+                            time.sleep(3)
+                except Exception as login_err:
+                    logger.error(f"Login error on attempt {login_attempt+1}: {login_err}")
+                    if login_attempt < max_login_attempts - 1:
+                        logger.info("Retrying login after error...")
+                        time.sleep(3)
+            
+            if not login_success:
+                result["message"] = "Failed to log in after multiple attempts"
+                result["errors"].append({"phase": "login", "error": "Authentication failed"})
+                return result
+            
+            # Step 3: Navigate to timetable page with retries and wait for content
+            timetable_html = None
+            for page_attempt in range(3):
+                try:
+                    logger.info(f"Navigating to timetable page (attempt {page_attempt+1}/3)")
+                    self.driver.get(TIMETABLE_URL)
+                    
+                    # Wait for the page to load substantially
+                    wait_success = False
+                    for i in range(30):  # 30 seconds max wait
+                        try:
+                            ready_state = self.driver.execute_script('return document.readyState')
+                            if ready_state == 'complete':
+                                logger.info(f"Page load complete after {i} seconds")
+                                
+                                # Check for actual timetable content
+                                page_text = self.driver.page_source
+                                if "Time Table" in page_text or "Timetable" in page_text:
+                                    logger.info("Timetable content detected")
+                                    wait_success = True
+                                    break
+                        except:
+                            pass
+                        time.sleep(1)
+                    
+                    if not wait_success:
+                        logger.warning("Page loaded but timetable content not detected, waiting longer")
+                        time.sleep(15)  # Extra wait
+                    
+                    # Take screenshot for debugging
+                    try:
+                        self.driver.save_screenshot(f"/tmp/timetable_page_{page_attempt}.png")
+                    except Exception as ss_err:
+                        logger.warning(f"Failed to save screenshot: {ss_err}")
+                    
+                    timetable_html = self.driver.page_source
+                    
+                    # Quick check if we got meaningful content
+                    if timetable_html and len(timetable_html) > 5000 and ("Time Table" in timetable_html or "Timetable" in timetable_html):
+                        logger.info("✅ Timetable page loaded successfully")
+                        break
+                    else:
+                        logger.warning(f"Timetable HTML may be incomplete (size: {len(timetable_html) if timetable_html else 0})")
+                        if page_attempt < 2:
+                            logger.info("Retrying page load...")
+                            time.sleep(5)
+                
+                except Exception as page_err:
+                    logger.error(f"Error loading timetable page on attempt {page_attempt+1}: {page_err}")
+                    if page_attempt < 2:
+                        logger.info("Retrying page load after error...")
+                        time.sleep(5)
+            
+            if not timetable_html:
+                result["message"] = "Failed to load timetable page"
+                result["errors"].append({"phase": "page_load", "error": "Timetable page load failed"})
+                return result
+            
+            # Step 4: Extract batch number with multiple methods
+            batch_number = None
+            try:
+                batch_number = self.parse_batch_number_from_page()
+                if batch_number:
+                    logger.info(f"✅ Detected batch number: {batch_number}")
+                else:
+                    logger.warning("Could not detect batch number, will try fallback methods")
+                    
+                    # Fallback 1: Look for batch in URL
+                    current_url = self.driver.current_url
+                    import re
+                    batch_match = re.search(r'batch=(\d+)', current_url)
+                    if batch_match:
+                        batch_number = batch_match.group(1)
+                        logger.info(f"Found batch {batch_number} from URL")
+                    
+                    # Fallback 2: Try to extract from user profile or cookies
+                    if not batch_number:
+                        batch_number = self.extract_batch_from_profile()
+                    
+                    # Fallback 3: Use default
+                    if not batch_number:
+                        # Default to batch 1 as safer option
+                        batch_number = "1"
+                        logger.warning(f"Using default batch number: {batch_number}")
+            except Exception as batch_err:
+                logger.error(f"Error detecting batch: {batch_err}")
+                # Use a default batch to continue
+                batch_number = "1"
+                logger.warning(f"Using default batch after error: {batch_number}")
+            
+            # Step 5: Scrape timetable data with multiple strategies
+            course_data = []
+            try:
+                # First try with standard approach
+                course_data = self.scrape_timetable()
+                
+                # If that fails, try alternative method
+                if not course_data:
+                    logger.warning("Standard timetable scraping failed, trying alternative method")
+                    course_data = self.scrape_timetable_alternative()
+                
+                logger.info(f"Scraped {len(course_data)} course entries")
+            except Exception as scrape_err:
+                logger.error(f"Error scraping timetable: {scrape_err}")
+                result["message"] = f"Timetable scraping failed: {str(scrape_err)}"
+                result["errors"].append({"phase": "scraping", "error": str(scrape_err)})
+                return result
+            
+            # Step 6: Merge timetable with appropriate template and save
+            try:
+                logger.info(f"Merging timetable with batch {batch_number} template")
+                merged_result = self.merge_timetable_with_courses(course_data, batch_number)
+                
+                if merged_result["status"] != "success":
+                    logger.error(f"Timetable merging failed: {merged_result.get('msg', 'Unknown error')}")
+                    result["message"] = f"Timetable merging failed: {merged_result.get('msg', 'Unknown error')}"
+                    result["errors"].append({"phase": "merging", "error": merged_result.get('msg', 'Unknown error')})
+                    return result
+                
+                logger.info("✅ Timetable merged successfully")
+                
+                # Try to store in database with retries
+                store_success = False
+                for db_attempt in range(3):
+                    try:
+                        logger.info(f"Storing timetable in database (attempt {db_attempt+1}/3)")
+                        store_success = self.store_timetable_in_supabase(merged_result)
+                        if store_success:
+                            logger.info("✅ Timetable stored successfully")
+                            break
+                        else:
+                            logger.warning(f"Database storage attempt {db_attempt+1} failed")
+                    except Exception as db_err:
+                        logger.error(f"Database error on attempt {db_attempt+1}: {db_err}")
+                        if db_attempt < 2:
+                            wait_time = 2 ** db_attempt
+                            logger.info(f"Retrying in {wait_time} seconds...")
+                            time.sleep(wait_time)
+                
+                # Even if database storage failed, we can still return the data
+                execution_time = time.time() - start_time
+                result = {
+                    "status": "success",
+                    "message": "Timetable scraping completed" + ("" if store_success else " (but storage failed)"),
+                    "timetable_data": merged_result["merged_timetable"],
+                    "batch": merged_result["batch"],
+                    "execution_time": execution_time
+                }
+                
+                logger.info(f"Timetable scraping completed in {execution_time:.2f} seconds")
+                return result
+                
+            except Exception as merge_err:
+                logger.error(f"Error in timetable merging or storage: {merge_err}")
+                result["message"] = f"Timetable processing failed: {str(merge_err)}"
+                result["errors"].append({"phase": "processing", "error": str(merge_err)})
+                return result
+                
         except Exception as e:
-            logger.error(f"Error in timetable scraper: {str(e)}")
-            if self.driver:
-                self.driver.quit()
-            return {"status": "error", "message": str(e)}
+            logger.error(f"Unexpected error in timetable scraper: {e}")
+            result["message"] = f"Unexpected error: {str(e)}"
+            result["errors"].append({"phase": "unknown", "error": str(e)})
+            traceback.print_exc()
+            return result
+        finally:
+            # Clean up resources
+            if hasattr(self, 'driver') and self.driver:
+                try:
+                    self.driver.quit()
+                    logger.info("Chrome driver closed successfully")
+                except:
+                    logger.warning("Error closing Chrome driver")
 
     def run_attendance_scraper(self):
         """Public interface to run the attendance scraper"""
@@ -1262,12 +2058,12 @@ class SRMScraper:
                 logger.error("Failed to extract registration number")
                 return {"status": "error", "message": "Failed to extract registration number"}
                 
-            user_id = self.get_user_id(registration_number)
+            user_id = self.get_user_id_robust(registration_number)
             if not user_id:
                 logger.error("Failed to get or create user in database")
                 return {"status": "error", "message": "Failed to get or create user in database"}
                 
-            result = self.parse_and_save_attendance(html_source, self.driver)
+            result = self.parse_and_save_attendance_robust(html_source, user_id)
             marks_result = self.parse_and_save_marks(html_source, self.driver)
             
             self.driver.quit()
@@ -1353,44 +2149,191 @@ class SRMScraper:
             return None
 
     def run_unified_scraper(self):
-        """Run both scrapers in a single session"""
-        logger.info("Starting unified scraper")
+        """Run both scrapers in a single session with enhanced robustness"""
+        logger.info("Starting unified scraper with advanced error handling")
+        start_time = time.time()
         
         result = {
             "status": "error",
-            "attendance_success": False,
-            "timetable_success": False,
-            "timetable_data": None,
             "message": "Not started",
-            "cookies": None
+            "attendance": {
+                "status": "not_started",
+                "data": None
+            },
+            "timetable": {
+                "status": "not_started",
+                "data": None
+            },
+            "marks": {
+                "status": "not_started",
+                "data": None
+            },
+            "execution_time": 0
         }
         
         try:
-            # Setup driver
+            # Setup driver with enhanced error handling
             self.driver = self.setup_driver()
-            if self.driver is None:
-                logger.error("Failed to initialize Chrome driver")
+            if not self.driver:
                 result["message"] = "Failed to initialize Chrome driver"
                 return result
             
-            # Login and extract cookies
-            if not self.ensure_login():
-                logger.error("Failed to log in to Academia. Aborting all scraping.")
-                result["message"] = "Login failed"
+            # Login with retry mechanism
+            login_success = self.ensure_login()
+            if not login_success:
+                result["message"] = "Failed to log in after multiple attempts"
                 return result
             
-            # Verify cookies after login
-            cookie_status = self.verify_cookies()
-            result["cookies"] = cookie_status
+            # Run attendance scraper first
+            try:
+                logger.info("Starting attendance data collection")
+                html_source = self.get_attendance_page()
+                
+                if html_source:
+                    # Get registration number
+                    soup = BeautifulSoup(html_source, "html.parser")
+                    registration_number = self.extract_registration_number_robust(soup)
+                    
+                    if registration_number:
+                        # Get user ID
+                        user_id = self.get_user_id_robust(registration_number)
+                        
+                        if user_id:
+                            # Process attendance data
+                            attendance_success = self.parse_and_save_attendance_robust(html_source, user_id)
+                            
+                            # Process marks data
+                            marks_success = self.parse_and_save_marks(html_source, self.driver)
+                            
+                            result["attendance"]["status"] = "success" if attendance_success else "error"
+                            result["marks"]["status"] = "success" if marks_success else "error"
+                            
+                            logger.info(f"Attendance scraping finished: {result['attendance']['status']}")
+                            logger.info(f"Marks scraping finished: {result['marks']['status']}")
+                else:
+                    logger.error("Failed to get attendance page HTML")
+                    result["attendance"]["status"] = "error"
+                    result["marks"]["status"] = "error"
+                    result["attendance"]["message"] = "Failed to load attendance page"
+            except Exception as attendance_err:
+                logger.error(f"Error during attendance scraping: {attendance_err}")
+                result["attendance"]["status"] = "error"
+                result["attendance"]["message"] = str(attendance_err)
+                result["marks"]["status"] = "error"
+                result["marks"]["message"] = str(attendance_err)
             
-            # Continue with existing scraping logic...
+            # Clear browsing data to minimize memory usage
+            try:
+                self.clear_browser_cache()
+            except:
+                pass
             
+            # Run timetable scraper
+            try:
+                logger.info("Starting timetable data collection")
+                
+                # Navigate to timetable page
+                self.driver.get(TIMETABLE_URL)
+                
+                # Wait for page to load
+                timetable_loaded = False
+                for i in range(30):
+                    try:
+                        ready_state = self.driver.execute_script('return document.readyState')
+                        if ready_state == 'complete':
+                            timetable_loaded = True
+                            break
+                    except:
+                        pass
+                    time.sleep(1)
+                
+                if timetable_loaded:
+                    # Extract batch number
+                    batch_number = self.parse_batch_number_from_page()
+                    
+                    if not batch_number:
+                        batch_number = self.extract_batch_from_profile()
+                        
+                    if not batch_number:
+                        # Default to batch 1 as safer option
+                        batch_number = "1"
+                        logger.warning(f"Using default batch number: {batch_number}")
+                    
+                    # Scrape course data
+                    course_data = self.scrape_timetable()
+                    
+                    if not course_data:
+                        # Try alternative method
+                        course_data = self.scrape_timetable_alternative()
+                    
+                    if course_data:
+                        # Merge with template
+                        merged_result = self.merge_timetable_with_courses(course_data, batch_number)
+                        
+                        if merged_result["status"] == "success":
+                            # Store in database
+                            store_success = self.store_timetable_in_supabase(merged_result)
+                            
+                            result["timetable"]["status"] = "success"
+                            result["timetable"]["data"] = {
+                                "batch": merged_result["batch"],
+                                "entries": len(course_data),
+                                "storage": "success" if store_success else "failed"
+                            }
+                            
+                            logger.info(f"Timetable scraping finished: {result['timetable']['status']}")
+                        else:
+                            result["timetable"]["status"] = "error"
+                            result["timetable"]["message"] = merged_result.get("msg", "Unknown error")
+                    else:
+                        result["timetable"]["status"] = "error"
+                        result["timetable"]["message"] = "No timetable data found"
+                else:
+                    result["timetable"]["status"] = "error"
+                    result["timetable"]["message"] = "Timetable page did not load"
+            except Exception as timetable_err:
+                logger.error(f"Error during timetable scraping: {timetable_err}")
+                result["timetable"]["status"] = "error"
+                result["timetable"]["message"] = str(timetable_err)
+            
+            # Set overall status
+            component_statuses = [
+                result["attendance"]["status"],
+                result["marks"]["status"],
+                result["timetable"]["status"]
+            ]
+            
+            if all(status == "success" for status in component_statuses):
+                result["status"] = "success"
+                result["message"] = "All scraping tasks completed successfully"
+            elif all(status == "error" for status in component_statuses):
+                result["status"] = "error"
+                result["message"] = "All scraping tasks failed"
+            else:
+                result["status"] = "partial_success"
+                result["message"] = "Some scraping tasks completed successfully"
+            
+            # Calculate execution time
+            result["execution_time"] = time.time() - start_time
+            
+            logger.info(f"Unified scraper finished in {result['execution_time']:.2f} seconds with status: {result['status']}")
             return result
+        
         except Exception as e:
-            logger.error(f"Error in unified scraper: {str(e)}")
+            logger.error(f"Unified scraper critical error: {e}")
+            result["status"] = "error"
+            result["message"] = f"Critical error: {str(e)}"
             traceback.print_exc()
-            result["message"] = str(e)
             return result
+        
+        finally:
+            # Clean up resources
+            if hasattr(self, 'driver') and self.driver:
+                try:
+                    self.driver.quit()
+                    logger.info("Browser closed successfully")
+                except:
+                    logger.warning("Error closing browser")
 
     def verify_token(self, token):
         """Verify a JWT token"""
@@ -1483,36 +2426,83 @@ class SRMScraper:
                 except Exception as ss_err:
                     logger.warning(f"Failed to save pre-switch screenshot: {ss_err}")
                 
+                # Log HTML title and URL for debugging
+                logger.info(f"Page title: {self.driver.title}")
+                logger.info(f"Current URL: {self.driver.current_url}")
+                
+                # Check page ready state
+                ready_state = self.driver.execute_script('return document.readyState')
+                logger.info(f"Document ready state: {ready_state}")
+                
                 # See if iframe exists at all
                 iframes = self.driver.find_elements(By.TAG_NAME, "iframe")
                 logger.info(f"Found {len(iframes)} iframes on page")
                 for i, frame in enumerate(iframes):
                     frame_id = frame.get_attribute("id") or "No ID"
                     frame_name = frame.get_attribute("name") or "No Name"
-                    logger.info(f"Frame {i}: ID={frame_id}, Name={frame_name}")
+                    frame_src = frame.get_attribute("src") or "No Source"
+                    is_displayed = "Visible" if self.is_element_visible(frame) else "Hidden"
+                    logger.info(f"Frame {i}: ID={frame_id}, Name={frame_name}, Src={frame_src}, {is_displayed}")
                 
-                # Wait for the iframe to be available in the DOM
-                WebDriverWait(self.driver, wait_time).until(
-                    EC.presence_of_element_located(iframe_selector)
-                )
+                # Handle different selector types
+                if iframe_selector[0] == By.ID:
+                    # Try iframe with matching ID
+                    matching_frames = [f for f in iframes if f.get_attribute("id") == iframe_selector[1]]
+                    if matching_frames:
+                        logger.info(f"Found {len(matching_frames)} iframes with matching ID")
+                        iframe = matching_frames[0]
+                    else:
+                        # Wait for the iframe to be available in the DOM
+                        WebDriverWait(self.driver, wait_time).until(
+                            EC.presence_of_element_located(iframe_selector)
+                        )
+                        iframe = self.driver.find_element(*iframe_selector)
+                elif iframe_selector[0] == By.NAME:
+                    # Try iframe with matching name
+                    matching_frames = [f for f in iframes if f.get_attribute("name") == iframe_selector[1]]
+                    if matching_frames:
+                        logger.info(f"Found {len(matching_frames)} iframes with matching name")
+                        iframe = matching_frames[0]
+                    else:
+                        # Wait for the iframe to be available in the DOM
+                        WebDriverWait(self.driver, wait_time).until(
+                            EC.presence_of_element_located(iframe_selector)
+                        )
+                        iframe = self.driver.find_element(*iframe_selector)
+                else:
+                    # Default to standard presence of element for other selector types
+                    WebDriverWait(self.driver, wait_time).until(
+                        EC.presence_of_element_located(iframe_selector)
+                    )
+                    iframe = self.driver.find_element(*iframe_selector)
                 
-                # Wait a bit more for the iframe to fully load
+                # Wait a bit for the iframe to fully load
                 time.sleep(2)
-                
-                # Get the iframe element
-                iframe = self.driver.find_element(*iframe_selector)
                 
                 # Scroll to the iframe to make sure it's in view
                 self.driver.execute_script("arguments[0].scrollIntoView(true);", iframe)
                 time.sleep(1)
                 
+                # Check if iframe is in a proper state
+                if not self.is_element_visible(iframe):
+                    logger.warning("iframe is not visible, attempting to scroll and wait...")
+                    self.driver.execute_script("window.scrollTo(0, 0);")  # Scroll to top
+                    time.sleep(1)
+                    self.driver.execute_script("arguments[0].scrollIntoView(true);", iframe)
+                    time.sleep(2)
+                
                 # Switch to the iframe
                 self.driver.switch_to.frame(iframe)
+                
+                # Verify the switch worked by checking we can access the iframe's document
+                self.driver.execute_script('return document.readyState')
+                
                 logger.info(f"✅ Successfully switched to iframe on attempt {attempt}")
                 return True
                 
-            except (TimeoutException, StaleElementReferenceException) as e:
+            except Exception as e:
                 logger.warning(f"⚠️ Attempt {attempt} to switch to iframe failed: {e}")
+                traceback.print_exc()
                 
                 # Take a screenshot for debugging
                 try:
@@ -1572,26 +2562,1423 @@ class SRMScraper:
         
         return email_field, login_button
 
-# Public interface to match the original script
-def run_scraper(email, password, scraper_type="attendance"):
+    def extract_registration_number_robust(self, soup):
+        """Extract registration number with multiple strategies"""
+        registration_number = None
+        strategies = [
+            # Strategy 1: Look for standard label and value pattern
+            lambda: self._extract_reg_number_from_label(soup),
+            
+            # Strategy 2: Look for registration patterns in any text
+            lambda: self._extract_reg_number_from_pattern(soup),
+            
+            # Strategy 3: Look for registration in specific page sections
+            lambda: self._extract_reg_number_from_sections(soup),
+            
+            # Strategy 4: Try to extract from URL or hidden fields
+            lambda: self._extract_reg_number_from_page_metadata(soup)
+        ]
+        
+        for i, strategy in enumerate(strategies):
+            try:
+                logger.info(f"Trying registration number extraction strategy {i+1}")
+                result = strategy()
+                if result:
+                    logger.info(f"✅ Successfully extracted registration number using strategy {i+1}: {result}")
+                    return result
+            except Exception as e:
+                logger.warning(f"Registration number extraction strategy {i+1} failed: {e}")
+        
+        # Last resort: try to use email as identifier
+        logger.warning("Failed to extract registration number, will use email as identifier")
+        return self.email.split('@')[0] if '@' in self.email else self.email
+
+    def _extract_reg_number_from_label(self, soup):
+        """Strategy 1: Extract registration from labeled elements"""
+        # Look for a table cell with "Registration Number" label
+        label_td = soup.find("td", string=lambda text: text and "Registration Number" in text)
+        if label_td:
+            value_td = label_td.find_next("td")
+            if value_td:
+                strong_elem = value_td.find("strong") or value_td.find("b")
+                if strong_elem:
+                    return strong_elem.get_text(strip=True)
+                else:
+                    return value_td.get_text(strip=True)
+        return None
+
+    def _extract_reg_number_from_pattern(self, soup):
+        """Strategy 2: Extract using regex patterns for registration numbers"""
+        import re
+        # Common formats: RA2211003010xxxx, RA22110xxxxx
+        patterns = [
+            r'RA\d{10,}',  # Standard SRM registration format
+            r'RA\d{8,}',    # Shorter variant
+            r'\d{10,}'      # Just digits as fallback
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, soup.get_text())
+            if match:
+                return match.group(0)
+        return None
+
+    def _extract_reg_number_from_sections(self, soup):
+        """Strategy 3: Look in specific sections that might contain registration"""
+        # Check profile section
+        profile_section = soup.find("div", class_=lambda c: c and "profile" in c.lower())
+        if profile_section:
+            # Look for registration pattern in profile
+            import re
+            match = re.search(r'RA\d{10,}', profile_section.get_text())
+            if match:
+                return match.group(0)
+        
+        # Check tables
+        for row in soup.find_all("tr"):
+            tds = row.find_all("td")
+            if len(tds) >= 2 and "Registration" in tds[0].get_text():
+                return tds[1].get_text(strip=True)
+        
+        return None
+
+    def _extract_reg_number_from_page_metadata(self, soup):
+        """Strategy 4: Try to extract from page metadata or driver state"""
+        # Try to get from URL if present
+        if hasattr(self, 'driver') and self.driver:
+            current_url = self.driver.current_url
+            import re
+            match = re.search(r'regnum=([A-Za-z0-9]+)', current_url)
+            if match:
+                return match.group(1)
+        
+        # Try from hidden input fields
+        for hidden_input in soup.find_all("input", type="hidden"):
+            name = hidden_input.get("name", "").lower()
+            if "reg" in name or "registration" in name:
+                return hidden_input.get("value", "")
+        
+        return None
+
+    def resilient_request(self, url, method="GET", data=None, headers=None, max_retries=3, timeout=30):
+        """Make a network request with retries and exponential backoff"""
+        import requests
+        from requests.adapters import HTTPAdapter
+        from urllib3.util.retry import Retry
+        
+        session = requests.Session()
+        
+        # Configure retry strategy
+        retry_strategy = Retry(
+            total=max_retries,
+            backoff_factor=1,  # 1, 2, 4, 8, 16, 32, ... seconds between retries
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["GET", "POST"]
+        )
+        
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        
+        try:
+            logger.info(f"Making {method} request to {url}")
+            
+            if method.upper() == "GET":
+                response = session.get(url, headers=headers, timeout=timeout)
+            elif method.upper() == "POST":
+                response = session.post(url, json=data, headers=headers, timeout=timeout)
+            else:
+                logger.error(f"Unsupported method: {method}")
+                return None
+            
+            response.raise_for_status()
+            logger.info(f"Request successful: {response.status_code}")
+            return response
+            
+        except requests.exceptions.HTTPError as http_err:
+            logger.error(f"HTTP error: {http_err}")
+            return None
+        except requests.exceptions.ConnectionError as conn_err:
+            logger.error(f"Connection error: {conn_err}")
+            return None
+        except requests.exceptions.Timeout as timeout_err:
+            logger.error(f"Timeout error: {timeout_err}")
+            return None
+        except requests.exceptions.RequestException as req_err:
+            logger.error(f"Request error: {req_err}")
+            return None
+
+    def health_check(self):
+        """Run a comprehensive health check to verify all components are working"""
+        health_status = {
+            "status": "error",
+            "timestamp": datetime.now().isoformat(),
+            "components": {
+                "driver": {"status": "not_checked"},
+                "network": {"status": "not_checked"},
+                "database": {"status": "not_checked"},
+                "academia_site": {"status": "not_checked"}
+            },
+            "errors": []
+        }
+        
+        # Check WebDriver
+        try:
+            logger.info("Checking WebDriver...")
+            self.driver = self.setup_driver()
+            if self.driver:
+                health_status["components"]["driver"]["status"] = "ok"
+                
+                # Get browser details
+                try:
+                    browser_info = {
+                        "name": self.driver.capabilities.get("browserName", "unknown"),
+                        "version": self.driver.capabilities.get("browserVersion", "unknown")
+                    }
+                    health_status["components"]["driver"]["details"] = browser_info
+                except:
+                    pass
+            else:
+                health_status["components"]["driver"]["status"] = "error"
+                health_status["errors"].append("Failed to initialize WebDriver")
+        except Exception as driver_err:
+            health_status["components"]["driver"]["status"] = "error"
+            health_status["components"]["driver"]["error"] = str(driver_err)
+            health_status["errors"].append(f"WebDriver error: {str(driver_err)}")
+        
+        # Check network
+        try:
+            logger.info("Checking network connectivity...")
+            # Try a few different domains to check connectivity
+            sites = ["https://google.com", "https://cloudflare.com", "https://github.com"]
+            network_results = {}
+            
+            for site in sites:
+                try:
+                    response = self.resilient_request(site, timeout=5)
+                    if response:
+                        network_results[site] = {
+                            "status": "ok",
+                            "status_code": response.status_code,
+                            "response_time": response.elapsed.total_seconds()
+                        }
+                    else:
+                        network_results[site] = {
+                            "status": "error",
+                            "error": "Request failed"
+                        }
+                except Exception as site_err:
+                    network_results[site] = {
+                        "status": "error",
+                        "error": str(site_err)
+                    }
+            
+            # Check if at least one site is accessible
+            if any(result["status"] == "ok" for result in network_results.values()):
+                health_status["components"]["network"]["status"] = "ok"
+                health_status["components"]["network"]["details"] = network_results
+            else:
+                health_status["components"]["network"]["status"] = "error"
+                health_status["components"]["network"]["details"] = network_results
+                health_status["errors"].append("Network connectivity issues detected")
+        except Exception as net_err:
+            health_status["components"]["network"]["status"] = "error"
+            health_status["components"]["network"]["error"] = str(net_err)
+            health_status["errors"].append(f"Network check error: {str(net_err)}")
+        
+        # Check database
+        try:
+            logger.info("Checking database connectivity...")
+            # Try a simple query to check database connectivity
+            try:
+                db_test = supabase.from_("users").select("count").limit(1).execute()
+                health_status["components"]["database"]["status"] = "ok"
+                health_status["components"]["database"]["details"] = {
+                    "query_success": True
+                }
+            except Exception as db_err:
+                health_status["components"]["database"]["status"] = "error"
+                health_status["components"]["database"]["error"] = str(db_err)
+                health_status["errors"].append(f"Database error: {str(db_err)}")
+        except Exception as db_wrapper_err:
+            health_status["components"]["database"]["status"] = "error"
+            health_status["components"]["database"]["error"] = str(db_wrapper_err)
+            health_status["errors"].append(f"Database wrapper error: {str(db_wrapper_err)}")
+        
+        # Check Academia site
+        try:
+            logger.info("Checking Academia site accessibility...")
+            if self.driver:
+                try:
+                    self.driver.set_page_load_timeout(10)  # Short timeout for health check
+                    self.driver.get(LOGIN_URL)
+                    
+                    # Wait for page to start loading
+                    time.sleep(2)
+                    
+                    # Check if page loaded something reasonable
+                    current_url = self.driver.current_url
+                    page_source = self.driver.page_source
+                    
+                    if "academia" in current_url.lower() and len(page_source) > 1000:
+                        health_status["components"]["academia_site"]["status"] = "ok"
+                        health_status["components"]["academia_site"]["details"] = {
+                            "url": current_url,
+                            "title": self.driver.title,
+                            "content_length": len(page_source)
+                        }
+                    else:
+                        health_status["components"]["academia_site"]["status"] = "warning"
+                        health_status["components"]["academia_site"]["details"] = {
+                            "url": current_url,
+                            "title": self.driver.title,
+                            "content_length": len(page_source)
+                        }
+                        health_status["errors"].append("Academia site may be inaccessible or loading differently")
+                except Exception as site_err:
+                    health_status["components"]["academia_site"]["status"] = "error"
+                    health_status["components"]["academia_site"]["error"] = str(site_err)
+                    health_status["errors"].append(f"Academia site error: {str(site_err)}")
+            else:
+                health_status["components"]["academia_site"]["status"] = "skipped"
+                health_status["components"]["academia_site"]["message"] = "WebDriver not available"
+        except Exception as site_wrapper_err:
+            health_status["components"]["academia_site"]["status"] = "error"
+            health_status["components"]["academia_site"]["error"] = str(site_wrapper_err)
+            health_status["errors"].append(f"Academia site wrapper error: {str(site_wrapper_err)}")
+        
+        # Clean up
+        if hasattr(self, 'driver') and self.driver:
+            try:
+                self.driver.quit()
+            except:
+                pass
+        
+        # Final status determination
+        component_statuses = [comp["status"] for comp in health_status["components"].values()]
+        if all(status == "ok" for status in component_statuses):
+            health_status["status"] = "ok"
+        elif "error" in component_statuses:
+            health_status["status"] = "error"
+        else:
+            health_status["status"] = "warning"
+        
+        return health_status
+
+    def scrape_timetable_alternative(self):
+        """
+        Alternative timetable scraping method used when the standard method fails.
+        Implements different strategies to extract course data.
+        """
+        logger.info("Using alternative timetable extraction method")
+        
+        try:
+            # First try to find course data using JavaScript approach
+            logger.info("Trying JavaScript extraction of timetable data")
+            try:
+                # This may work if the data is available in the page's JavaScript objects
+                js_result = self.driver.execute_script("""
+                    if (typeof timetableData !== 'undefined') {
+                        return timetableData;
+                    } else if (typeof window.courseData !== 'undefined') {
+                        return window.courseData;
+                    } else {
+                        // Try to find any array with course-like objects
+                        for (let key in window) {
+                            if (window[key] && 
+                                Array.isArray(window[key]) && 
+                                window[key].length > 0 &&
+                                typeof window[key][0] === 'object' &&
+                                (window[key][0].hasOwnProperty('courseCode') || 
+                                 window[key][0].hasOwnProperty('course_code') ||
+                                 window[key][0].hasOwnProperty('slot'))) {
+                                return window[key];
+                            }
+                        }
+                    }
+                    return null;
+                """)
+                
+                if js_result and isinstance(js_result, list) and len(js_result) > 0:
+                    logger.info(f"Successfully extracted {len(js_result)} courses via JavaScript")
+                    
+                    # Convert from JavaScript format to our expected format
+                    converted_data = []
+                    for item in js_result:
+                        converted = {}
+                        # Map different possible key names to our standard keys
+                        key_mappings = {
+                            'courseCode': 'course_code',
+                            'course_code': 'course_code',
+                            'course': 'course_code',
+                            'courseTitle': 'course_title',
+                            'course_title': 'course_title',
+                            'title': 'course_title',
+                            'name': 'course_title',
+                            'slot': 'slot',
+                            'timeSlot': 'slot',
+                            'facultyName': 'faculty_name',
+                            'faculty_name': 'faculty_name',
+                            'faculty': 'faculty_name',
+                            'instructor': 'faculty_name',
+                            'gcrCode': 'gcr_code',
+                            'gcr_code': 'gcr_code',
+                            'gcr': 'gcr_code',
+                            'courseType': 'course_type',
+                            'course_type': 'course_type',
+                            'type': 'course_type',
+                            'roomNo': 'room_no',
+                            'room_no': 'room_no',
+                            'room': 'room_no'
+                        }
+                        
+                        # Apply mappings
+                        for src_key, dst_key in key_mappings.items():
+                            if src_key in item:
+                                converted[dst_key] = item[src_key]
+                        
+                        # Ensure all required fields exist
+                        if 'course_code' in converted and 'course_title' in converted:
+                            converted_data.append(converted)
+                    
+                    if converted_data:
+                        return converted_data
+            except Exception as js_err:
+                logger.warning(f"JavaScript extraction failed: {js_err}")
+            
+            # If JavaScript approach failed, try HTML parsing approach
+            logger.info("Trying direct HTML parsing for timetable data")
+            soup = BeautifulSoup(self.driver.page_source, "html.parser")
+            
+            # Strategy 1: Look for tables with specific structure related to timetable
+            all_tables = soup.find_all("table")
+            course_data = []
+            
+            for table in all_tables:
+                # Skip small tables that are unlikely to be the timetable
+                rows = table.find_all("tr")
+                if len(rows) < 2:
+                    continue
+                    
+                # Check if this looks like a course table by examining headers
+                headers = rows[0].find_all(["th", "td"])
+                header_text = " ".join([h.get_text().lower() for h in headers])
+                
+                if any(term in header_text for term in ["course", "slot", "faculty", "subject"]):
+                    logger.info(f"Found potential timetable with {len(rows)-1} entries")
+                    
+                    # Try to determine column mapping
+                    header_texts = [h.get_text().lower().strip() for h in headers]
+                    
+                    col_map = {}
+                    for i, header in enumerate(header_texts):
+                        if any(term in header for term in ["course code", "subject code"]):
+                            col_map["course_code"] = i
+                        elif any(term in header for term in ["course title", "subject name", "course name"]):
+                            col_map["course_title"] = i
+                        elif "slot" in header:
+                            col_map["slot"] = i
+                        elif any(term in header for term in ["gcr", "venue code"]):
+                            col_map["gcr_code"] = i
+                        elif any(term in header for term in ["faculty", "teacher", "instructor"]):
+                            col_map["faculty_name"] = i
+                        elif any(term in header for term in ["course type", "category"]):
+                            col_map["course_type"] = i
+                        elif any(term in header for term in ["room", "venue"]):
+                            col_map["room_no"] = i
+                    
+                    # Skip if we couldn't identify the essential columns
+                    if "course_code" not in col_map or "course_title" not in col_map:
+                        logger.warning("Table doesn't have required columns, skipping")
+                        continue
+                    
+                    # Process data rows
+                    for row in rows[1:]:
+                        cells = row.find_all(["td", "th"])
+                        
+                        # Skip rows with insufficient cells
+                        if len(cells) < max(col_map.values()) + 1:
+                            continue
+                            
+                        course_record = {}
+                        for field, idx in col_map.items():
+                            if idx < len(cells):
+                                course_record[field] = cells[idx].get_text().strip()
+                        
+                        # Add default values for missing fields
+                        for field in ["course_code", "course_title", "slot", "gcr_code", "faculty_name", "course_type", "room_no"]:
+                            if field not in course_record:
+                                course_record[field] = ""
+                                
+                        # Only add if we have the essential data
+                        if course_record["course_code"] and course_record["course_title"]:
+                            course_data.append(course_record)
+                    
+                    # If we found data in this table, return it
+                    if course_data:
+                        logger.info(f"Successfully extracted {len(course_data)} courses via HTML parsing")
+                        return course_data
+            
+            # If no data found from tables, try looking for structured divs or lists
+            logger.info("Trying div/list structures for timetable data")
+            
+            # Strategy for divs that might contain course information
+            course_sections = soup.find_all("div", class_=lambda c: c and any(term in c.lower() for term in ["course", "subject", "timetable"]))
+            
+            for section in course_sections:
+                # Look for structured data within this section
+                course_elements = section.find_all("div", class_=lambda c: c and any(term in c.lower() for term in ["item", "course", "row"]))
+                
+                if course_elements:
+                    logger.info(f"Found {len(course_elements)} potential course elements")
+                    
+                    for element in course_elements:
+                        try:
+                            # Try to extract course info from this element
+                            course_info = {}
+                            
+                            # Look for labeled data
+                            for label in ["course code", "subject code", "code"]:
+                                code_elem = element.find(string=lambda s: s and label in s.lower())
+                                if code_elem:
+                                    # Find the value near this label
+                                    parent = code_elem.parent
+                                    # Look for value in siblings
+                                    next_elem = parent.find_next(["span", "div", "p", "strong"])
+                                    if next_elem:
+                                        course_info["course_code"] = next_elem.get_text().strip()
+                                        break
+                            
+                            for label in ["course title", "subject name", "course name", "title"]:
+                                title_elem = element.find(string=lambda s: s and label in s.lower())
+                                if title_elem:
+                                    parent = title_elem.parent
+                                    next_elem = parent.find_next(["span", "div", "p", "strong"])
+                                    if next_elem:
+                                        course_info["course_title"] = next_elem.get_text().strip()
+                                        break
+                            
+                            for label in ["slot", "time slot"]:
+                                slot_elem = element.find(string=lambda s: s and label in s.lower())
+                                if slot_elem:
+                                    parent = slot_elem.parent
+                                    next_elem = parent.find_next(["span", "div", "p", "strong"])
+                                    if next_elem:
+                                        course_info["slot"] = next_elem.get_text().strip()
+                                        break
+                            
+                            # Only add if we have essential info
+                            if "course_code" in course_info and "course_title" in course_info:
+                                # Add empty strings for missing fields
+                                for field in ["slot", "gcr_code", "faculty_name", "course_type", "room_no"]:
+                                    if field not in course_info:
+                                        course_info[field] = ""
+                                
+                                course_data.append(course_info)
+                        except Exception as elem_err:
+                            logger.warning(f"Error processing course element: {elem_err}")
+                    
+                    if course_data:
+                        logger.info(f"Successfully extracted {len(course_data)} courses from div/list structures")
+                        return course_data
+            
+            # If all methods failed, look for any tables with data that might be course-related
+            if not course_data:
+                logger.info("Trying generic table extraction as last resort")
+                
+                for table in all_tables:
+                    rows = table.find_all("tr")
+                    if len(rows) < 2 or len(rows[0].find_all(["th", "td"])) < 2:
+                        continue
+                    
+                    # Check if table has enough cells that might be course data
+                    data_cells = rows[1].find_all(["td", "th"])
+                    if len(data_cells) >= 3:
+                        for row in rows[1:]:
+                            cells = row.find_all(["td", "th"])
+                            if len(cells) >= 3:
+                                # Assume first cell is code, second is title, third might be slot
+                                course_info = {
+                                    "course_code": cells[0].get_text().strip(),
+                                    "course_title": cells[1].get_text().strip(),
+                                    "slot": cells[2].get_text().strip() if len(cells) > 2 else "",
+                                    "gcr_code": cells[3].get_text().strip() if len(cells) > 3 else "",
+                                    "faculty_name": cells[4].get_text().strip() if len(cells) > 4 else "",
+                                    "course_type": cells[5].get_text().strip() if len(cells) > 5 else "",
+                                    "room_no": cells[6].get_text().strip() if len(cells) > 6 else ""
+                                }
+                                
+                                # Check if this looks like course data (code usually has letters and numbers)
+                                if re.match(r'[A-Za-z0-9]+', course_info["course_code"]) and len(course_info["course_title"]) > 3:
+                                    course_data.append(course_info)
+                        
+                        if course_data:
+                            logger.info(f"Extracted {len(course_data)} potential courses via generic table extraction")
+                            return course_data
+            
+            # If all methods failed, return empty list
+            logger.warning("All timetable extraction methods failed")
+            return []
+            
+        except Exception as e:
+            logger.error(f"Error in alternative timetable scraping: {e}")
+            traceback.print_exc()
+            return []
+
+    def extract_batch_from_profile(self):
+        """
+        Try to extract batch info from the user profile page or from cookies
+        """
+        logger.info("Attempting to extract batch from user profile")
+        
+        try:
+            # Try to navigate to profile page if available
+            try:
+                profile_links = self.driver.find_elements(By.XPATH, "//a[contains(@href, 'Profile') or contains(@href, 'profile') or contains(text(), 'Profile')]")
+                
+                if profile_links:
+                    # Save current URL to return later
+                    current_url = self.driver.current_url
+                    
+                    # Click on profile link
+                    self.click_element_safely(profile_links[0])
+                    logger.info("Clicked on profile link")
+                    
+                    # Wait for profile page to load
+                    time.sleep(5)
+                    
+                    # Look for batch info on the page
+                    page_source = self.driver.page_source
+                    soup = BeautifulSoup(page_source, "html.parser")
+                    
+                    # Try various strategies to find batch
+                    batch_label = soup.find(string=lambda s: s and "Batch" in s)
+                    if batch_label:
+                        parent = batch_label.parent
+                        # Look for value near this label
+                        for i in range(3):  # Check a few levels
+                            if not parent:
+                                break
+                            # Check siblings or children
+                            next_elem = parent.find_next(["td", "span", "div", "p", "strong"])
+                            if next_elem:
+                                batch_text = next_elem.get_text().strip()
+                                # Extract numeric part
+                                batch_match = re.search(r'(\d+)', batch_text)
+                                if batch_match and batch_match.group(1) in ["1", "2"]:
+                                    logger.info(f"Found batch {batch_match.group(1)} in profile")
+                                    
+                                    # Return to original page
+                                    self.driver.get(current_url)
+                                    
+                                    return batch_match.group(1)
+                            parent = parent.parent
+                    
+                    # Return to original page
+                    self.driver.get(current_url)
+            except Exception as profile_err:
+                logger.warning(f"Error accessing profile page: {profile_err}")
+            
+            # If profile page didn't work, try to extract from cookies or local storage
+            logger.info("Trying to extract batch from cookies or storage")
+            try:
+                # Check cookies
+                cookies = self.driver.get_cookies()
+                for cookie in cookies:
+                    if "batch" in cookie["name"].lower():
+                        value = cookie["value"]
+                        batch_match = re.search(r'(\d+)', value)
+                        if batch_match and batch_match.group(1) in ["1", "2"]:
+                            logger.info(f"Found batch {batch_match.group(1)} in cookies")
+                            return batch_match.group(1)
+                
+                # Check local storage
+                local_storage = self.driver.execute_script("return Object.keys(localStorage).reduce((obj, key) => {obj[key] = localStorage.getItem(key); return obj;}, {})")
+                
+                for key, value in local_storage.items():
+                    if "batch" in key.lower() and value:
+                        batch_match = re.search(r'(\d+)', value)
+                        if batch_match and batch_match.group(1) in ["1", "2"]:
+                            logger.info(f"Found batch {batch_match.group(1)} in local storage")
+                            return batch_match.group(1)
+            except Exception as storage_err:
+                logger.warning(f"Error extracting from cookies/storage: {storage_err}")
+            
+            # Try to guess from URL patterns
+            try:
+                current_url = self.driver.current_url
+                batch_param = re.search(r'[?&]batch=(\d+)', current_url)
+                if batch_param and batch_param.group(1) in ["1", "2"]:
+                    logger.info(f"Found batch {batch_param.group(1)} in URL")
+                    return batch_param.group(1)
+            except Exception as url_err:
+                logger.warning(f"Error extracting from URL: {url_err}")
+            
+            # If all methods failed, return None
+            logger.warning("Could not extract batch information")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error in batch extraction: {e}")
+            return None
+
+    def detect_environment(self):
+        """
+        Detect the current deployment environment and adapt settings accordingly.
+        This improves robustness across different hosting platforms.
+        """
+        environment = {
+            "platform": "unknown",
+            "is_containerized": False,
+            "memory_limit_mb": None,
+            "cpu_count": None,
+            "python_version": sys.version.split()[0],
+            "os": os.name
+        }
+        
+        # Detect platform
+        if "RAILWAY_STATIC_URL" in os.environ:
+            environment["platform"] = "railway"
+            environment["is_containerized"] = True
+        elif "RENDER" in os.environ:
+            environment["platform"] = "render"
+            environment["is_containerized"] = True
+        elif "VERCEL" in os.environ or "VERCEL_URL" in os.environ:
+            environment["platform"] = "vercel"
+            environment["is_containerized"] = True
+        elif "KOYEB" in os.environ:
+            environment["platform"] = "koyeb"
+            environment["is_containerized"] = True
+        elif "NETLIFY" in os.environ:
+            environment["platform"] = "netlify"
+            environment["is_containerized"] = True
+        elif "HEROKU_APP_ID" in os.environ:
+            environment["platform"] = "heroku"
+            environment["is_containerized"] = True
+        elif os.path.exists("/.dockerenv"):
+            environment["platform"] = "docker"
+            environment["is_containerized"] = True
+        
+        # Try to detect resources
+        try:
+            import psutil
+            memory = psutil.virtual_memory()
+            environment["memory_limit_mb"] = memory.total / (1024 * 1024)
+            environment["cpu_count"] = psutil.cpu_count()
+        except:
+            pass
+        
+        # Log the environment info
+        logger.info(f"Detected environment: {environment}")
+        
+        # Adjust scraper settings based on environment
+        if environment["is_containerized"]:
+            logger.info("Running in containerized environment, applying optimizations")
+            
+            # Apply specific optimizations for low-memory environments
+            if environment["memory_limit_mb"] and environment["memory_limit_mb"] < 1024:
+                logger.info("Low memory environment detected (<1GB), applying aggressive memory optimizations")
+                # Will affect setup_driver and other memory-intensive operations
+                self.low_memory_mode = True
+            else:
+                self.low_memory_mode = False
+                
+            # Platform-specific adjustments
+            if environment["platform"] == "railway":
+                # Railway-specific settings
+                pass
+            elif environment["platform"] == "render":
+                # Render-specific settings
+                pass
+        else:
+            logger.info("Running in non-containerized environment")
+            self.low_memory_mode = False
+        
+        return environment
+
+    def recover_from_error(self, error_type, context=None):
+        """
+        Advanced error recovery system that can take different actions based on the type of error.
+        This makes the scraper much more resilient to failures.
+        """
+        logger.info(f"Attempting to recover from {error_type} error in context: {context}")
+        
+        if error_type == "driver_crash":
+            # Handle WebDriver crash
+            logger.info("Attempting to restart WebDriver after crash")
+            
+            if hasattr(self, 'driver') and self.driver:
+                try:
+                    self.driver.quit()
+                except:
+                    pass
+                self.driver = None
+            
+            # Reinitialize driver
+            try:
+                self.driver = self.setup_driver()
+                return self.driver is not None
+            except Exception as restart_err:
+                logger.error(f"Failed to restart WebDriver: {restart_err}")
+                return False
+                
+        elif error_type == "session_expired":
+            # Handle expired login session
+            logger.info("Attempting to refresh login session")
+            
+            try:
+                if hasattr(self, 'driver') and self.driver:
+                    self.is_logged_in = False
+                    return self.ensure_login()
+                else:
+                    logger.error("No active WebDriver to refresh session")
+                    return False
+            except Exception as login_err:
+                logger.error(f"Failed to refresh login session: {login_err}")
+                return False
+                
+        elif error_type == "page_load_timeout":
+            # Handle page load timeout
+            logger.info("Attempting to recover from page load timeout")
+            
+            try:
+                if hasattr(self, 'driver') and self.driver:
+                    # Refresh page with longer timeout
+                    self.driver.set_page_load_timeout(60)  # Extended timeout
+                    self.driver.refresh()
+                    time.sleep(2)
+                    return True
+                else:
+                    logger.error("No active WebDriver for page refresh")
+                    return False
+            except Exception as refresh_err:
+                logger.error(f"Failed to refresh page: {refresh_err}")
+                return False
+                
+        elif error_type == "database_error":
+            # Handle database connection error
+            logger.info("Attempting to recover from database error")
+            
+            try:
+                # Try a simple query to check if db connection is working again
+                test_query = supabase.from_("users").select("count").limit(1).execute()
+                logger.info("Database connection restored")
+                return True
+            except Exception as db_err:
+                logger.error(f"Database still unavailable: {db_err}")
+                
+                # Fall back to local storage if necessary
+                if context and isinstance(context, dict) and "data" in context and "user_id" in context:
+                    try:
+                        # Save to backup file
+                        backup_file = f"{context['user_id']}_{int(time.time())}.json"
+                        with open(backup_file, 'w') as f:
+                            json.dump(context["data"], f)
+                        logger.info(f"Saved data to backup file: {backup_file}")
+                        return True
+                    except Exception as backup_err:
+                        logger.error(f"Failed to save backup: {backup_err}")
+                
+                return False
+                
+        elif error_type == "stale_element":
+            # Handle stale element reference
+            logger.info("Attempting to recover from stale element")
+            
+            try:
+                if hasattr(self, 'driver') and self.driver:
+                    # Refresh the DOM
+                    self.driver.refresh()
+                    time.sleep(2)
+                    return True
+                else:
+                    return False
+            except Exception as refresh_err:
+                logger.error(f"Failed to refresh DOM: {refresh_err}")
+                return False
+        
+        elif error_type == "memory_pressure":
+            # Handle memory pressure
+            logger.info("Attempting to recover from memory pressure")
+            
+            try:
+                if hasattr(self, 'driver') and self.driver:
+                    # Clear cache
+                    self.clear_browser_cache()
+                    
+                    # Execute garbage collection
+                    self.driver.execute_script("window.gc();")
+                    
+                    # Limit open tabs/windows
+                    if len(self.driver.window_handles) > 1:
+                        current_handle = self.driver.current_window_handle
+                        for handle in self.driver.window_handles:
+                            if handle != current_handle:
+                                self.driver.switch_to.window(handle)
+                                self.driver.close()
+                        self.driver.switch_to.window(current_handle)
+                    
+                    # Reduce image loading
+                    self.driver.execute_script("""
+                        document.querySelectorAll('img').forEach(img => {
+                            img.loading = 'lazy';
+                            if (img.src && !img.src.startsWith('data:')) {
+                                img.setAttribute('data-src', img.src);
+                                img.src = '';
+                            }
+                        });
+                    """)
+                    
+                    logger.info("Applied memory optimization measures")
+                    return True
+                else:
+                    return False
+            except Exception as mem_err:
+                logger.error(f"Failed to optimize memory: {mem_err}")
+                return False
+        
+        elif error_type == "iframe_switch_failure":
+            # Handle iframe switch failures
+            logger.info("Attempting to recover from iframe switch failure")
+            
+            try:
+                if hasattr(self, 'driver') and self.driver:
+                    # Reset frame context
+                    self.driver.switch_to.default_content()
+                    
+                    # Try a different approach - direct URL navigation
+                    if context and isinstance(context, dict) and "target_url" in context:
+                        self.driver.get(context["target_url"])
+                        logger.info(f"Direct navigation to {context['target_url']}")
+                        return True
+                    else:
+                        # Refresh and try slower loading strategy
+                        self.driver.refresh()
+                        # Wait longer before attempting iframe operations
+                        time.sleep(10)
+                        logger.info("Page refreshed with extended wait time")
+                        return True
+                else:
+                    return False
+            except Exception as frame_err:
+                logger.error(f"Failed to recover from iframe failure: {frame_err}")
+                return False
+        
+        elif error_type == "network_error":
+            # Handle network connectivity issues
+            logger.info("Attempting to recover from network error")
+            
+            # Wait for connectivity to return
+            for attempt in range(5):
+                try:
+                    # Check connection by making a lightweight request
+                    import requests
+                    response = requests.get("https://www.google.com", timeout=5)
+                    if response.status_code == 200:
+                        logger.info(f"Network connectivity restored after {attempt+1} attempts")
+                        
+                        # Refresh current page if we have a driver
+                        if hasattr(self, 'driver') and self.driver:
+                            self.driver.refresh()
+                            logger.info("Current page refreshed after network recovery")
+                        
+                        return True
+                except:
+                    wait_time = 5 * (attempt + 1)
+                    logger.info(f"Network still down, waiting {wait_time} seconds...")
+                    time.sleep(wait_time)
+            
+            logger.error("Failed to recover from network error after multiple attempts")
+            return False
+        
+        # Unknown error type - general recovery attempt
+        logger.warning(f"Unknown error type: {error_type}, attempting generic recovery")
+        try:
+            if hasattr(self, 'driver') and self.driver:
+                # Try to refresh the page
+                self.driver.refresh()
+                time.sleep(3)
+                return True
+            else:
+                return False
+        except Exception as generic_err:
+            logger.error(f"Generic recovery failed: {generic_err}")
+            return False
+
+    def save_cookies_with_fallbacks(self, cookies, email):
+        """
+        Save cookies with multiple fallback strategies to ensure they're preserved.
+        This helps maintain sessions across different environments.
+        """
+        logger.info(f"Saving cookies for {email} with fallback strategies")
+        
+        if not cookies:
+            logger.error("No cookies to save")
+            return False
+        
+        success = False
+        error_messages = []
+        
+        # Strategy 1: Save to Supabase
+        try:
+            # Generate JWT token
+            token = self.create_jwt_token(email)
+            
+            if token:
+                cookie_data = {
+                    'email': email,
+                    'cookies': cookies,
+                    'token': token,
+                    'updated_at': datetime.now().isoformat()
+                }
+                
+                # Delete old record first
+                supabase.table('user_cookies').delete().eq('email', email).execute()
+                
+                # Insert new record
+                result = supabase.table('user_cookies').insert(cookie_data).execute()
+                if result.data:
+                    logger.info("✅ Successfully saved cookies to Supabase")
+                    success = True
+                else:
+                    error_messages.append("Supabase insert returned no data")
+            else:
+                error_messages.append("Failed to generate JWT token")
+        except Exception as db_err:
+            error_messages.append(f"Supabase error: {str(db_err)}")
+            logger.warning(f"Failed to save cookies to Supabase: {db_err}")
+        
+        # Strategy 2: Save to local file as backup
+        try:
+            cookie_file = f"cookies_{email.replace('@', '_at_')}.json"
+            with open(cookie_file, 'w') as f:
+                json.dump({
+                    'email': email,
+                    'cookies': cookies,
+                    'timestamp': datetime.now().isoformat()
+                }, f)
+            logger.info(f"✅ Successfully saved cookies to local file: {cookie_file}")
+            success = True
+        except Exception as file_err:
+            error_messages.append(f"File error: {str(file_err)}")
+            logger.warning(f"Failed to save cookies to file: {file_err}")
+        
+        # Strategy 3: Save to environment variables
+        try:
+            # Convert cookies to a base64-encoded string
+            import base64
+            cookie_str = json.dumps(cookies)
+            encoded_cookies = base64.b64encode(cookie_str.encode()).decode()
+            
+            # Set environment variable
+            os.environ[f"COOKIES_{email.replace('@', '_AT_').upper()}"] = encoded_cookies
+            logger.info("✅ Successfully saved cookies to environment variable")
+            success = True
+        except Exception as env_err:
+            error_messages.append(f"Environment error: {str(env_err)}")
+            logger.warning(f"Failed to save cookies to environment: {env_err}")
+        
+        if not success:
+            logger.error(f"Failed to save cookies with all strategies: {'; '.join(error_messages)}")
+        
+        return success
+
+    def load_cookies_with_fallbacks(self, email):
+        """
+        Load cookies with multiple fallback strategies to ensure maximum reliability.
+        """
+        logger.info(f"Loading cookies for {email} with fallback strategies")
+        
+        # Strategy 1: Load from Supabase
+        try:
+            resp = supabase.table('user_cookies').select('cookies, updated_at').eq('email', email).single().execute()
+            
+            if resp.data and 'cookies' in resp.data:
+                cookies = resp.data['cookies']
+                updated_at = resp.data.get('updated_at')
+                
+                # Check if cookies are stale
+                if updated_at:
+                    try:
+                        updated_time = datetime.fromisoformat(updated_at.replace('Z', '+00:00'))
+                        now = datetime.now(updated_time.tzinfo)
+                        age_hours = (now - updated_time).total_seconds() / 3600
+                        
+                        if age_hours > 12:  # If cookies are older than 12 hours
+                            logger.warning(f"Cookies are {age_hours:.1f} hours old, might be stale")
+                        else:
+                            logger.info(f"Cookies are {age_hours:.1f} hours old, should be fresh")
+                    except Exception as date_err:
+                        logger.warning(f"Error calculating cookie age: {date_err}")
+                
+                logger.info("✅ Successfully loaded cookies from Supabase")
+                return cookies
+        except Exception as db_err:
+            logger.warning(f"Failed to load cookies from Supabase: {db_err}")
+        
+        # Strategy 2: Load from local file
+        try:
+            cookie_file = f"cookies_{email.replace('@', '_at_')}.json"
+            if os.path.exists(cookie_file):
+                with open(cookie_file, 'r') as f:
+                    data = json.load(f)
+                    if 'cookies' in data:
+                        logger.info(f"✅ Successfully loaded cookies from file: {cookie_file}")
+                        return data['cookies']
+        except Exception as file_err:
+            logger.warning(f"Failed to load cookies from file: {file_err}")
+        
+        # Strategy 3: Load from environment variables
+        try:
+            env_key = f"COOKIES_{email.replace('@', '_AT_').upper()}"
+            if env_key in os.environ:
+                import base64
+                encoded_cookies = os.environ[env_key]
+                cookie_str = base64.b64decode(encoded_cookies.encode()).decode()
+                cookies = json.loads(cookie_str)
+                logger.info("✅ Successfully loaded cookies from environment variable")
+                return cookies
+        except Exception as env_err:
+            logger.warning(f"Failed to load cookies from environment: {env_err}")
+        
+        logger.warning("No cookies found with any strategy")
+        return None
+
+    def login_with_fallbacks(self):
+        """
+        Multi-stage login strategy that tries Selenium first, then falls back to
+        direct requests-based login if Selenium fails. This ensures maximum
+        resilience for login which is a critical step.
+        """
+        logger.info("Attempting login with multiple fallback strategies")
+        
+        # First try: Selenium-based login
+        try:
+            logger.info("Trying Selenium-based login")
+            selenium_success = self.login()
+            
+            if selenium_success:
+                logger.info("✅ Selenium login successful")
+                return True
+            else:
+                logger.warning("Selenium login failed, trying alternatives")
+        except Exception as selenium_err:
+            logger.warning(f"Selenium login error: {selenium_err}")
+        
+        # Second try: Load cookies from storage
+        try:
+            logger.info("Trying to login with stored cookies")
+            stored_cookies = self.load_cookies_with_fallbacks(self.email)
+            
+            if stored_cookies and len(stored_cookies) > 0:
+                # Apply cookies to the driver
+                if hasattr(self, 'driver') and self.driver:
+                    try:
+                        # Clear existing cookies first
+                        self.driver.delete_all_cookies()
+                        
+                        # Add each cookie
+                        for cookie in stored_cookies:
+                            try:
+                                self.driver.add_cookie(cookie)
+                            except Exception as cookie_err:
+                                logger.warning(f"Error adding cookie: {cookie_err}")
+                        
+                        # Navigate to homepage to test cookies
+                        self.driver.get(BASE_URL)
+                        time.sleep(3)
+                        
+                        # Check if we're logged in
+                        if self.is_logged_in_check():
+                            logger.info("✅ Login with stored cookies successful")
+                            self.is_logged_in = True
+                            return True
+                    except Exception as cookie_apply_err:
+                        logger.warning(f"Error applying cookies: {cookie_apply_err}")
+        except Exception as cookie_err:
+            logger.warning(f"Cookie-based login error: {cookie_err}")
+        
+        # Final try: Requests-based login (HTTP fallback)
+        try:
+            logger.info("Trying HTTP-based fallback login")
+            cookies = self.login_with_requests()
+            
+            if cookies:
+                # Save the cookies for future use
+                self.save_cookies_with_fallbacks(cookies, self.email)
+                
+                # Apply cookies to the driver if available
+                if hasattr(self, 'driver') and self.driver:
+                    try:
+                        # Clear existing cookies
+                        self.driver.delete_all_cookies()
+                        
+                        # Add each cookie
+                        for name, value in cookies.items():
+                            cookie = {
+                                'name': name,
+                                'value': value,
+                                'domain': '.academia.srmist.edu.in',
+                                'path': '/'
+                            }
+                            self.driver.add_cookie(cookie)
+                        
+                        # Navigate to homepage to test cookies
+                        self.driver.get(BASE_URL)
+                        time.sleep(3)
+                        
+                        if self.is_logged_in_check():
+                            logger.info("✅ HTTP fallback login and cookie application successful")
+                            self.is_logged_in = True
+                            return True
+                    except Exception as apply_err:
+                        logger.warning(f"Error applying HTTP cookies to driver: {apply_err}")
+                
+                # Even if we couldn't apply to driver, consider this a "partial" success
+                # We at least have cookies that could be used later
+                logger.info("⚠️ HTTP login successful but cookies not applied to driver")
+                self.is_logged_in = True
+                return True
+        except Exception as http_err:
+            logger.error(f"HTTP fallback login error: {http_err}")
+        
+        # If we reach here, all login methods failed
+        logger.error("❌ All login methods failed")
+        return False
+
+    def is_logged_in_check(self):
+        """Check if we're currently logged in based on page content"""
+        if not hasattr(self, 'driver') or not self.driver:
+            return False
+        
+        try:
+            # Look for elements that indicate being logged in
+            page_source = self.driver.page_source.lower()
+            
+            # Check 1: Look for logout link/button
+            if "logout" in page_source or "sign out" in page_source:
+                return True
+            
+            # Check 2: Look for user profile elements
+            if "my profile" in page_source or "my account" in page_source:
+                return True
+            
+            # Check 3: Check for specific dashboard elements
+            dashboard_elements = self.driver.find_elements(By.XPATH, 
+                                                        "//a[contains(@href, 'My_Attendance') or contains(@href, 'Dashboard')]")
+            if dashboard_elements:
+                return True
+            
+            # Check 4: Check for personal greeting with email
+            email_prefix = self.email.split('@')[0]
+            if email_prefix.lower() in page_source:
+                return True
+        except Exception as check_err:
+            logger.warning(f"Error checking login status: {check_err}")
+        
+        return False
+
+    def login_with_requests(self):
+        """
+        HTTP-based login fallback that doesn't rely on Selenium.
+        This is useful when browser automation is unreliable.
+        """
+        logger.info("Performing HTTP-based login")
+        
+        import requests
+        
+        # Start a session to maintain cookies
+        session = requests.Session()
+        
+        try:
+            # Step 1: Get initial cookies from login page
+            logger.info("Fetching login page")
+            response = session.get(LOGIN_URL, timeout=30)
+            response.raise_for_status()
+            
+            # Step 2: Extract CSRF token or other form fields if present
+            import re
+            
+            # Extract hidden input fields
+            form_fields = {}
+            csrf_pattern = re.compile(r'<input[^>]*name=["\'](_csrf|csrfToken|csrf-token)["\'][^>]*value=["\']([^"\']+)["\']', re.IGNORECASE)
+            csrf_match = csrf_pattern.search(response.text)
+            if csrf_match:
+                form_fields[csrf_match.group(1)] = csrf_match.group(2)
+                logger.info(f"Found CSRF token: {csrf_match.group(1)}={csrf_match.group(2)}")
+            
+            # Look for other required hidden fields
+            hidden_inputs = re.findall(r'<input[^>]*type=["\']hidden["\'][^>]*name=["\']([^"\']+)["\'][^>]*value=["\']([^"\']*)["\']', response.text)
+            for name, value in hidden_inputs:
+                form_fields[name] = value
+                logger.info(f"Found hidden field: {name}={value}")
+            
+            # Step 3: Submit login form
+            logger.info("Submitting login form")
+            login_data = {
+                'login_id': self.email,
+                'password': self.password,
+                **form_fields
+            }
+            
+            # Find login form action URL
+            form_action = LOGIN_URL  # Default
+            form_action_match = re.search(r'<form[^>]*action=["\']([^"\']+)["\']', response.text)
+            if form_action_match:
+                form_action = form_action_match.group(1)
+                # Handle relative URLs
+                if not form_action.startswith('http'):
+                    if form_action.startswith('/'):
+                        form_action = LOGIN_URL + form_action[1:]
+                    else:
+                        form_action = LOGIN_URL + form_action
+            
+            # Submit form
+            login_response = session.post(form_action, data=login_data, timeout=30)
+            
+            # Step 4: Check for login success
+            if login_response.url != LOGIN_URL and "login" not in login_response.url.lower():
+                logger.info("Login seems successful based on redirect URL")
+                
+                # Check content for confirmation
+                success_indicators = [
+                    "dashboard", "attendance", "profile", "my account", "welcome", "logged in"
+                ]
+                
+                if any(indicator in login_response.text.lower() for indicator in success_indicators):
+                    logger.info("✅ Login confirmed by page content")
+                    
+                    # Return the cookies as a dictionary
+                    return dict(session.cookies.items())
+                else:
+                    logger.warning("Login redirect happened but content doesn't confirm login")
+            else:
+                logger.warning("Login failed, still on login page")
+            
+            return None
+        
+        except requests.exceptions.RequestException as req_err:
+            logger.error(f"HTTP request error during login: {req_err}")
+            return None
+        except Exception as e:
+            logger.error(f"Unexpected error in HTTP login: {e}")
+            return None
+
+def run_scraper(email, password, scraper_type="attendance", max_retries=2):
     """
-    Run the specified scraper with the provided credentials
+    Enhanced public interface to run the scraper with comprehensive reporting
+    and automatic retry logic.
     
-    scraper_type can be:
-    - "attendance": Just run attendance scraper
-    - "timetable": Just run timetable scraper
-    - "unified": Run both scrapers in a single browser session (recommended for Render)
+    Args:
+        email: User's SRM email
+        password: User's password
+        scraper_type: Type of scraper to run (attendance, timetable, unified)
+        max_retries: Number of full retries if execution fails completely
+    
+    Returns:
+        dict: Results of the scraping operation with detailed status info
     """
+    result = {
+        "status": "error",
+        "message": "Not started",
+        "started_at": datetime.now().isoformat(),
+        "completed_at": None,
+        "duration_seconds": None,
+        "scraper_type": scraper_type,
+        "environment": None,
+        "retries": 0,
+        "data": None,
+        "errors": []
+    }
+    
+    # Configure detailed logging
+    setup_logging()
+    
+    # Record start time
+    start_time = time.time()
+    
+    logger.info(f"Starting {scraper_type} scraper for {email}")
+    
+    # Create scraper instance
     scraper = SRMScraper(email, password)
     
-    if scraper_type.lower() == "attendance":
-        return scraper.run_attendance_scraper()
-    elif scraper_type.lower() == "timetable":
-        return scraper.run_timetable_scraper()
-    elif scraper_type.lower() == "unified":
-        return scraper.run_unified_scraper()
-    else:
-        return {"status": "error", "message": f"Unknown scraper type: {scraper_type}"}
+    # Detect environment for adaptive settings
+    try:
+        result["environment"] = scraper.detect_environment()
+    except Exception as env_err:
+        logger.warning(f"Environment detection failed: {env_err}")
+    
+    # Main execution loop with retries
+    for attempt in range(max_retries + 1):
+        if attempt > 0:
+            result["retries"] += 1
+            logger.info(f"Retry attempt {attempt}/{max_retries} for the complete scraper")
+            # Sleep with exponential backoff
+            wait_time = 5 * (2 ** (attempt - 1))
+            logger.info(f"Waiting {wait_time} seconds before retry...")
+            time.sleep(wait_time)
+        
+        try:
+            # Execute the appropriate scraper type
+            if scraper_type.lower() == "attendance":
+                scraper_result = scraper.run_attendance_scraper()
+            elif scraper_type.lower() == "timetable":
+                scraper_result = scraper.run_timetable_scraper()
+            elif scraper_type.lower() == "unified":
+                scraper_result = scraper.run_unified_scraper()
+            else:
+                result["message"] = f"Unknown scraper type: {scraper_type}"
+                result["errors"].append({
+                    "type": "configuration",
+                    "message": f"Unknown scraper type: {scraper_type}"
+                })
+                break
+            
+            # Update result with scraper output
+            result["status"] = scraper_result.get("status", "unknown")
+            result["message"] = scraper_result.get("message", "Execution completed without detailed status")
+            result["data"] = scraper_result
+            
+            # If successful, break the retry loop
+            if result["status"] == "success" or result["status"] == "partial_success":
+                logger.info(f"Scraper executed successfully: {result['status']}")
+                break
+            else:
+                # Log error for retry
+                logger.error(f"Scraper execution failed: {result['status']} - {result['message']}")
+                result["errors"].append({
+                    "type": "execution",
+                    "attempt": attempt,
+                    "message": result["message"]
+                })
+        
+        except Exception as e:
+            # Log the exception
+            logger.error(f"Exception during scraper execution: {e}")
+            logger.error(traceback.format_exc())
+            
+            # Update result with error details
+            result["errors"].append({
+                "type": "exception",
+                "attempt": attempt,
+                "message": str(e),
+                "traceback": traceback.format_exc()
+            })
+            
+            # If all retries are exhausted, update the final status
+            if attempt == max_retries:
+                result["message"] = f"Failed after {max_retries+1} attempts: {str(e)}"
+    
+    # Calculate duration
+    end_time = time.time()
+    result["duration_seconds"] = end_time - start_time
+    result["completed_at"] = datetime.now().isoformat()
+    
+    # Log completion
+    logger.info(f"Scraper execution completed in {result['duration_seconds']:.2f} seconds with status: {result['status']}")
+    logger.info(f"Total retries: {result['retries']}")
+    
+    return result
 
 if __name__ == "__main__":
     import argparse
