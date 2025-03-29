@@ -261,10 +261,8 @@ class SRMScraper:
                     chrome_options.binary_location = "/usr/bin/google-chrome-stable"
                     self.driver = webdriver.Chrome(options=chrome_options)
                 elif attempt == 2:
-                    # Try with webdriver-manager
+                # Try with webdriver-manager
                     logger.info("Trying with webdriver-manager...")
-                    from selenium.webdriver.chrome.service import Service
-                    from webdriver_manager.chrome import ChromeDriverManager
                     service = Service(ChromeDriverManager().install())
                     self.driver = webdriver.Chrome(service=service, options=chrome_options)
                 elif attempt == 3:
@@ -406,10 +404,16 @@ class SRMScraper:
                             # Continue anyway, maybe it's still workable
                             page_loaded = True
                             break
-                            
                     except Exception as e:
                         logger.warning(f"⚠️ Failed to load login page on attempt {page_attempt+1}: {e}")
                         time.sleep(3)
+                        
+                        if not page_loaded:
+                            logger.error("❌ Failed to load login page after multiple attempts")
+                            continue  # Try the entire login process again
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to load login page on attempt {page_attempt+1}: {e}")
+                time.sleep(3)
                 
                 if not page_loaded:
                     logger.error("❌ Failed to load login page after multiple attempts")
@@ -594,7 +598,7 @@ class SRMScraper:
                                 # First check if we need to switch iframe context again
                                 try:
                                     password_field = self.driver.find_element(By.ID, "password")
-                                except:
+                                except Exception:
                                     logger.info("Password field not found directly, checking iframe context")
                                     # Maybe we're back to default content or in a different iframe
                                     self.driver.switch_to.default_content()
@@ -606,7 +610,6 @@ class SRMScraper:
                                             if self.switch_to_iframe_safely(iframe_selector, max_attempts=1):
                                                 logger.info(f"Switched to {strategy['name']} iframe for password field")
                                                 break
-                                
                                 # Look for password field again with multiple selectors
                                 for selector in [
                                     (By.ID, "password"),
@@ -625,38 +628,38 @@ class SRMScraper:
                                     
                             except Exception as pw_err:
                                 logger.warning(f"Error finding password field (attempt {find_attempt+1}): {pw_err}")
-                                time.sleep(2)
-                        
+                        time.sleep(2)
+
                         if not password_field:
                             logger.error("❌ Could not find password field after clicking next")
-                            
+            
                             # Take screenshot for debugging
-                            try:
-                                self.driver.save_screenshot(f"/tmp/password_field_not_found_{login_attempt}.png")
-                            except:
-                                pass
+                        try:
+                            self.driver.save_screenshot(f"/tmp/password_field_not_found_{login_attempt}.png")
+                        except:
+                           pass
                                 
                             # Try the entire login process again
-                            continue
+                        continue
                         
                         # Enter password
+                    try:
+                        password_field.clear()
+                        time.sleep(0.5)
+                        password_field.send_keys(self.password)
+                        logger.info("Entered password")
+                    except Exception as pw_entry_err:
+                        logger.warning(f"Error entering password: {pw_entry_err}")
+                        # Try JavaScript as fallback
                         try:
-                            password_field.clear()
-                            time.sleep(0.5)
-                            password_field.send_keys(self.password)
-                            logger.info("Entered password")
-                        except Exception as pw_entry_err:
-                            logger.warning(f"Error entering password: {pw_entry_err}")
-                            # Try JavaScript as fallback
-                            try:
-                                self.driver.execute_script(
+                            self.driver.execute_script(
                                     'arguments[0].value = arguments[1]', 
                                     password_field, self.password
-                                )
-                                logger.info("Entered password via JavaScript")
-                            except Exception as js_err:
-                                logger.error(f"Failed to enter password via JavaScript: {js_err}")
-                                continue
+                            )
+                            logger.info("Entered password via JavaScript")
+                        except Exception as js_err:
+                            logger.error(f"Failed to enter password via JavaScript: {js_err}")
+                            continue
                         
                         # Find and click Sign In button
                         sign_in_button = None
@@ -688,27 +691,27 @@ class SRMScraper:
                 
                 # 4. Verify login success with multiple indicators
                 time.sleep(5)  # Wait for login to complete
-                
-                # Switch back to default content
-                self.driver.switch_to.default_content()
-                
+            
+            # Switch back to default content
+            self.driver.switch_to.default_content()
+            
                 # Take screenshot for debugging
-                try:
+            try:
                     self.driver.save_screenshot(f"/tmp/post_login_{login_attempt}.png")
                     logger.info("Screenshot saved of post-login page")
-                except Exception as ss_err:
+            except Exception as ss_err:
                     logger.warning(f"Failed to save post-login screenshot: {ss_err}")
                 
                 # Check for login success indicators
-                login_successful = False
+            login_successful = False
                 
                 # Strategy 1: Check URL
-                if BASE_URL in self.driver.current_url and "login" not in self.driver.current_url.lower():
+            if BASE_URL in self.driver.current_url and "login" not in self.driver.current_url.lower():
                     logger.info("URL indicates successful login")
                     login_successful = True
                 
                 # Strategy 2: Check for dashboard elements
-                if not login_successful:
+            if not login_successful:
                     try:
                         dashboard_elements = self.driver.find_elements(By.XPATH, 
                                                                    "//a[contains(@href, 'My_Attendance') or contains(@href, 'Dashboard')]")
@@ -719,13 +722,13 @@ class SRMScraper:
                         pass
                 
                 # Strategy 3: Check for user-specific content
-                if not login_successful:
+            if not login_successful:
                     page_source = self.driver.page_source.lower()
                     if "log out" in page_source or "sign out" in page_source or "logout" in page_source or "signout" in page_source:
                         logger.info("Found logout option, indicating successful login")
                         login_successful = True
                 
-                if login_successful:
+            if login_successful:
                     logger.info("✅ Login verified as successful")
                     
                     # Extract cookies with retry
@@ -735,9 +738,14 @@ class SRMScraper:
                             cookies = self.driver.get_cookies()
                             cookie_dict = {cookie['name']: cookie['value'] for cookie in cookies}
                             logger.info(f"✅ Extracted {len(cookie_dict)} cookies: {list(cookie_dict.keys())}")
-                            
+                            cookies_extracted = True
+                            break
+                        except Exception as cookie_err:
+                            logger.warning(f"Error extracting cookies (attempt {cookie_attempt+1}): {cookie_err}")
+                            time.sleep(2)
                             # Generate JWT token
                             token = self.create_jwt_token(self.email)
+                    
                             if not token:
                                 raise Exception("Failed to generate JWT token")
                             
@@ -763,30 +771,23 @@ class SRMScraper:
                                 except Exception as db_err:
                                     logger.warning(f"Error saving cookies to database (attempt {db_attempt+1}): {db_err}")
                                     time.sleep(2)
-                            
-                            if cookies_extracted:
-                                break
-                        except Exception as cookie_err:
-                            logger.warning(f"Error extracting cookies (attempt {cookie_attempt+1}): {cookie_err}")
-                            time.sleep(2)
+                                    
+                                    if cookies_extracted:
+                                        break
+                                except Exception as cookie_err:
+                                    logger.warning(f"Error extracting cookies (attempt {cookie_attempt+1}): {cookie_err}")
+                                    time.sleep(2)
                     
                     self.is_logged_in = True
-                    
+                
                     # Log metrics for debugging
                     logger.info(f"Login success metrics: {metrics}")
-                    
                     return True
-                else:
-                    logger.warning("⚠️ Login verification failed, will retry")
-                    
-            except Exception as e:
-                logger.error(f"❌ Exception during login attempt {login_attempt+1}: {e}")
-                traceback.print_exc()
         
         # If we get here, all login attempts failed
         logger.error(f"❌ ALL LOGIN ATTEMPTS FAILED. Metrics: {metrics}")
         return False
-
+                
     def is_element_visible(self, element):
         """Check if an element is visible on the page"""
         try:
@@ -815,13 +816,13 @@ class SRMScraper:
                     return True
                 except Exception as ac_err:
                     logger.error(f"All click methods failed: {ac_err}")
-                    return False
+            return False
 
     def get_attendance_page(self):
         """Navigate to attendance page and get HTML with better load detection"""
         if not self.ensure_login():
             return None
-        
+            
         logger.info("Navigating to attendance page")
         self.driver.get(ATTENDANCE_PAGE_URL)
         
@@ -910,8 +911,14 @@ class SRMScraper:
                     logger.info(f"✅ Found existing user with ID: {user['id']}")
                     return user["id"]
                 
+            except Exception as e:
+                logger.error(f"❌ Exception during user lookup (attempt {attempt+1}/{max_attempts}): {e}")
+                traceback.print_exc()
+                metrics["user_lookup_errors"].append(str(e))
+                time.sleep(backoff_factor ** attempt)
+                
                 # If no user found, try looking up by registration number as fallback
-                if registration_number:
+            if registration_number:
                     logger.info(f"Looking up user by registration number: {registration_number}")
                     try:
                         reg_resp = supabase.table("users").select("id")\
@@ -934,37 +941,22 @@ class SRMScraper:
                         logger.warning(f"Error looking up by registration: {reg_err}, will create new user")
                 
                 # Create a new user with the available information
-                logger.info("Creating new user")
-                new_user = {
-                    "email": self.email,
+                        logger.info("Creating new user")
+        new_user = {
+            "email": self.email,
                     "registration_number": registration_number or "",
                     "password_hash": generate_password_hash("temporary_password_" + str(int(time.time()))),
                     "created_at": datetime.now().isoformat()
-                }
+        }
                 
-                insert_resp = supabase.table("users").insert(new_user).execute()
-                if insert_resp.data and len(insert_resp.data) > 0:
+        insert_resp = supabase.table("users").insert(new_user).execute()
+        if insert_resp.data and len(insert_resp.data) > 0:
                     user_id = insert_resp.data[0]["id"]
                     logger.info(f"✅ Created new user with ID: {user_id}")
                     return user_id
-                else:
+        else:
                     raise Exception("Insert returned no data")
                 
-            except Exception as e:
-                wait_time = backoff_factor ** attempt
-                logger.warning(f"Database operation failed (attempt {attempt+1}/{max_attempts}): {e}")
-                logger.info(f"Retrying in {wait_time} seconds...")
-                time.sleep(wait_time)
-        
-        # If we get here, all attempts failed
-        logger.error("❌ All attempts to get/create user failed")
-        
-        # Last resort fallback: generate a temporary user ID
-        # This allows the scraper to continue even if the database is unavailable
-        import hashlib
-        fallback_id = hashlib.md5(self.email.encode()).hexdigest()
-        logger.warning(f"Using fallback user ID mechanism: {fallback_id}")
-        return fallback_id
 
     def parse_and_save_attendance_robust(self, html, user_id):
         """Parse attendance data and save to Supabase with robust error handling"""
@@ -978,19 +970,20 @@ class SRMScraper:
                 logger.error(f"BeautifulSoup parsing failed: {parse_err}")
                 # Try a more lenient parser
                 soup = BeautifulSoup(html, "html5lib")
-            
+        except Exception as e:
+                logger.error(f"BeautifulSoup parsing failed: {e}")
             # ===== Multi-strategy attendance table extraction =====
-            attendance_tables = []
+        attendance_tables = []
             
             # Strategy 1: Look for tables containing "Course Code"
-            logger.info("Trying to find attendance tables containing 'Course Code'")
-            tables_1 = [table for table in soup.find_all("table") if "Course Code" in table.text]
-            if tables_1:
+        logger.info("Trying to find attendance tables containing 'Course Code'")
+        tables_1 = [table for table in soup.find_all("table") if "Course Code" in table.text]
+        if tables_1:
                 logger.info(f"Found {len(tables_1)} attendance tables using Strategy 1")
                 attendance_tables.extend(tables_1)
             
             # Strategy 2: Look for tables with specific structure
-            if not attendance_tables:
+        if not attendance_tables:
                 logger.info("Trying to find attendance tables with attendance structure")
                 for table in soup.find_all("table"):
                     # Check header row for attendance-related columns
@@ -1008,7 +1001,7 @@ class SRMScraper:
                     logger.info(f"Found {len(attendance_tables)} attendance tables using Strategy 2")
             
             # Strategy 3: Look for any tables near "Attendance" text
-            if not attendance_tables:
+        if not attendance_tables:
                 logger.info("Trying to find attendance tables by proximity to 'Attendance' text")
                 attendance_heading = soup.find(string=lambda s: s and "Attendance" in s)
                 if attendance_heading:
@@ -1027,8 +1020,8 @@ class SRMScraper:
                     logger.info(f"Found {len(attendance_tables)} attendance tables using Strategy 3")
             
             # If no tables found, check if we can proceed with other sections
-            if not attendance_tables:
-                logger.error("No attendance tables found in the HTML!")
+                if not attendance_tables:
+                   logger.error("No attendance tables found in the HTML!")
                 # Save empty attendance data as placeholder
                 empty_attendance = {
                     "registration_number": "Unknown",
@@ -1038,12 +1031,12 @@ class SRMScraper:
                 
                 self.upsert_attendance_data(user_id, empty_attendance)
                 return False
-            
+
             # ===== Multi-strategy attendance record extraction =====
-            logger.info(f"Processing {len(attendance_tables)} attendance tables")
-            attendance_records = []
+                logger.info(f"Processing {len(attendance_tables)} attendance tables")
+        attendance_records = []
             
-            for table_idx, attendance_table in enumerate(attendance_tables):
+        for table_idx, attendance_table in enumerate(attendance_tables):
                 logger.info(f"Processing attendance table {table_idx+1}")
                 
                 # Try to determine header row and column mapping
@@ -1119,25 +1112,25 @@ class SRMScraper:
                             logger.warning(f"Table {table_idx+1}, Row {row_idx+1}: Missing course code/title, skipping")
                             continue
                             
-                        attendance_records.append(record)
+                            attendance_records.append(record)
                         
                     except Exception as record_error:
                         logger.warning(f"Error processing row {row_idx+1} in table {table_idx+1}: {record_error}")
                         continue
             
             # Deduplicate records
-            deduplicated_records = {}
-            for record in attendance_records:
+        deduplicated_records = {}
+        for record in attendance_records:
                 key = (record["course_code"], record["category"]) if record["category"] else record["course_code"]
                 # Keep the record with the most information
                 if key not in deduplicated_records or self._record_completeness(record) > self._record_completeness(deduplicated_records[key]):
                     deduplicated_records[key] = record
             
-            attendance_records = list(deduplicated_records.values())
-            logger.info(f"Extracted {len(attendance_records)} unique attendance records")
+        attendance_records = list(deduplicated_records.values())
+        logger.info(f"Extracted {len(attendance_records)} unique attendance records")
             
             # If we have no records, check if we should continue
-            if not attendance_records:
+        if not attendance_records:
                 logger.warning("No attendance records extracted, saving empty data")
                 empty_attendance = {
                     "registration_number": "Unknown",
@@ -1149,20 +1142,15 @@ class SRMScraper:
                 return False
             
             # Construct the full attendance JSON
-            registration_number = self.extract_registration_number_robust(soup) or "Unknown"
-            attendance_json = {
+        registration_number = self.extract_registration_number_robust(soup) or "Unknown"
+        attendance_json = {
                 "registration_number": registration_number,
                 "last_updated": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
                 "records": attendance_records
             }
-            
+
             # Save to database with retry
-            return self.upsert_attendance_data(user_id, attendance_json)
-            
-        except Exception as e:
-            logger.error(f"❌ Error in attendance parsing and saving: {e}")
-            traceback.print_exc()
-            return False
+        return self.upsert_attendance_data(user_id, attendance_json)
 
     def _record_completeness(self, record):
         """Helper to determine how complete a record is"""
@@ -1209,13 +1197,10 @@ class SRMScraper:
                     "created_at": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
                     "updated_at": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
                 }).execute()
-                
+
                 if in_resp.data and len(in_resp.data) > 0:
                     logger.info("✅ Attendance data inserted successfully")
                     return True
-                else:
-                    raise Exception("Insert returned no data")
-                
             except Exception as e:
                 wait_time = 2 ** attempt  # Exponential backoff
                 logger.warning(f"Database operation failed (attempt {attempt+1}): {e}")
@@ -1237,7 +1222,7 @@ class SRMScraper:
                         logger.error(f"Even backup file save failed: {backup_err}")
                         return False
         
-        return False
+            return False
 
     def get_course_title(self, course_code, attendance_records):
         """
@@ -1979,10 +1964,15 @@ class SRMScraper:
                     return result
                 
                 logger.info("✅ Timetable merged successfully")
+            except Exception as merge_err:
+                logger.error(f"Error in timetable merging: {merge_err}")
+                result["message"] = f"Timetable merging failed: {str(merge_err)}"
+                result["errors"].append({"phase": "merging", "error": str(merge_err)})
+                return result
                 
                 # Try to store in database with retries
-                store_success = False
-                for db_attempt in range(3):
+            store_success = False
+            for db_attempt in range(3):
                     try:
                         logger.info(f"Storing timetable in database (attempt {db_attempt+1}/3)")
                         store_success = self.store_timetable_in_supabase(merged_result)
@@ -1999,8 +1989,8 @@ class SRMScraper:
                             time.sleep(wait_time)
                 
                 # Even if database storage failed, we can still return the data
-                execution_time = time.time() - start_time
-                result = {
+            execution_time = time.time() - start_time
+            result = {
                     "status": "success",
                     "message": "Timetable scraping completed" + ("" if store_success else " (but storage failed)"),
                     "timetable_data": merged_result["merged_timetable"],
@@ -2008,21 +1998,15 @@ class SRMScraper:
                     "execution_time": execution_time
                 }
                 
-                logger.info(f"Timetable scraping completed in {execution_time:.2f} seconds")
-                return result
+            logger.info(f"Timetable scraping completed in {execution_time:.2f} seconds")
+            return result
                 
-            except Exception as merge_err:
+        except Exception as merge_err:
                 logger.error(f"Error in timetable merging or storage: {merge_err}")
                 result["message"] = f"Timetable processing failed: {str(merge_err)}"
                 result["errors"].append({"phase": "processing", "error": str(merge_err)})
                 return result
-                
-        except Exception as e:
-            logger.error(f"Unexpected error in timetable scraper: {e}")
-            result["message"] = f"Unexpected error: {str(e)}"
-            result["errors"].append({"phase": "unknown", "error": str(e)})
-            traceback.print_exc()
-            return result
+        
         finally:
             # Clean up resources
             if hasattr(self, 'driver') and self.driver:
