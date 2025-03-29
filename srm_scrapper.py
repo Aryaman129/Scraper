@@ -194,9 +194,10 @@ class SRMScraper:
         self.password = password
         
     def setup_driver(self):
-        """Initialize Chrome driver with robust fallback mechanisms for any environment"""
+        """Initialize Chrome driver with robust fallback mechanisms"""
         logger.info("Setting up Chrome driver with enhanced robustness...")
         
+        # Use the globally imported Options
         chrome_options = Options()
         
         # Core headless settings with multiple user agents to try
