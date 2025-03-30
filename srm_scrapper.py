@@ -149,10 +149,8 @@ class SRMScraper:
         chrome_options.add_argument('--disable-features=TranslateUI,BlinkGenPropertyTrees')
         
         # Memory optimization
-        chrome_options.add_argument('--single-process')
         chrome_options.add_argument('--disable-software-rasterizer')
         chrome_options.add_argument('--disable-dev-shm-usage')
-        chrome_options.add_argument('--memory-pressure-off')
         
         # Headless configuration
         chrome_options.add_argument('--headless=new')
@@ -162,15 +160,22 @@ class SRMScraper:
         chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
         chrome_options.add_experimental_option("useAutomationExtension", False)
         
-        # Version-pinned Chrome installation
-        CHROME_VERSION = "114.0.5735.90"  # Match this with your ChromeDriver
-        chrome_options.binary_location = f"/usr/bin/google-chrome-{CHROME_VERSION}"
-        
-        # Initialize with webdriver-manager
-        from webdriver_manager.chrome import ChromeDriverManager
-        service = Service(ChromeDriverManager(version=CHROME_VERSION).install())
-        
-        return webdriver.Chrome(service=service, options=chrome_options)
+        # Cross-platform Chrome initialization
+        try:
+            # Initialize with webdriver-manager (safer cross-platform approach)
+            from webdriver_manager.chrome import ChromeDriverManager
+            service = Service(ChromeDriverManager().install())
+            
+            return webdriver.Chrome(service=service, options=chrome_options)
+        except Exception as e:
+            logger.error(f"Error initializing Chrome driver: {e}")
+            # Try fallback approach if first attempt fails
+            try:
+                service = Service()
+                return webdriver.Chrome(service=service, options=chrome_options)
+            except Exception as e2:
+                logger.error(f"Fallback Chrome initialization failed: {e2}")
+                return None
 
     def ensure_login(self):
         """Robust login verification with multiple checks"""
