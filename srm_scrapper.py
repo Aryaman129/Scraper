@@ -137,47 +137,23 @@ class SRMScraper:
         self.password = password
         
     def setup_driver(self):
-        """Robust Chrome initialization with fallbacks"""
+        """Connect to the pre-configured Chrome in the selenium/standalone-chrome image"""
         chrome_options = webdriver.ChromeOptions()
         
-        # Critical stability arguments
+        # Basic required options
         chrome_options.add_argument('--headless=new')
         chrome_options.add_argument('--no-sandbox')
         chrome_options.add_argument('--disable-dev-shm-usage')
-        chrome_options.add_argument('--disable-gpu')
-        chrome_options.add_argument('--disable-extensions')
         
-        # Try multiple initialization approaches
-        for attempt in range(3):
-            try:
-                logger.info(f"Chrome initialization attempt {attempt+1}")
-                
-                if attempt == 0:
-                    # Approach 1: Use pre-installed chromedriver from Dockerfile
-                    service = Service(executable_path="/usr/local/bin/chromedriver")
-                    driver = webdriver.Chrome(service=service, options=chrome_options)
-                    logger.info("✅ Chrome initialized using pre-installed chromedriver")
-                    return driver
-                    
-                elif attempt == 1:
-                    # Approach 2: Let Selenium find the driver
-                    service = Service()
-                    driver = webdriver.Chrome(service=service, options=chrome_options)
-                    logger.info("✅ Chrome initialized using default Service")
-                    return driver
-                
-                else:
-                    # Approach 3: Direct Chrome options with no service
-                    driver = webdriver.Chrome(options=chrome_options)
-                    logger.info("✅ Chrome initialized with no explicit service")
-                    return driver
-                    
-            except Exception as e:
-                logger.warning(f"Chrome initialization attempt {attempt+1} failed: {e}")
-                time.sleep(1)  # Short delay between attempts
-        
-        logger.error("All Chrome initialization attempts failed")
-        return None
+        # The standalone-chrome container already has ChromeDriver setup
+        try:
+            driver = webdriver.Chrome(options=chrome_options)
+            version = driver.capabilities.get('browserVersion', 'unknown')
+            logger.info(f"✅ Chrome initialized successfully (version: {version})")
+            return driver
+        except Exception as e:
+            logger.error(f"❌ Chrome initialization failed: {e}")
+            return None
 
     def ensure_login(self):
         """Robust login verification with multiple checks"""
