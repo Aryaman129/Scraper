@@ -137,24 +137,101 @@ class SRMScraper:
         self.password = password
         
     def setup_driver(self):
-        """Auto-detecting Chrome installation"""
-        chrome_options = webdriver.ChromeOptions()
+        """Initialize Chrome driver with appropriate options for Render deployment"""
+        logger.info("Setting up Chrome driver...")
         
-        # Core stability arguments
-        chrome_options.add_argument('--headless=new')
+        chrome_options = Options()
+        # Essential flags for Render's free tier
+        chrome_options.add_argument('--headless')
         chrome_options.add_argument('--no-sandbox')
         chrome_options.add_argument('--disable-dev-shm-usage')
         chrome_options.add_argument('--disable-gpu')
         
+        # Memory optimization flags (critical for Render free tier)
+        chrome_options.add_argument('--disable-renderer-backgrounding')
+        chrome_options.add_argument('--disable-background-timer-throttling')
+        chrome_options.add_argument('--disable-backgrounding-occluded-windows')
+        chrome_options.add_argument('--disable-client-side-phishing-detection')
+        chrome_options.add_argument('--memory-pressure-off')
+        chrome_options.add_argument('--single-process')  # Important for limiting memory usage
+        chrome_options.add_argument('--remote-debugging-port=9222')  # Enable debugging
+        
+        # Basic optimization flags
+        chrome_options.add_argument('--window-size=1920,1080')
+        chrome_options.add_argument('--disable-extensions')
+        chrome_options.add_argument('--disable-infobars')
+        chrome_options.add_argument('--disable-notifications')
+        chrome_options.add_argument('--disable-popup-blocking')
+        chrome_options.add_argument('--start-maximized')
+        chrome_options.add_argument('--disable-blink-features=AutomationControlled')
+        chrome_options.add_experimental_option('excludeSwitches', ['enable-automation'])
+        chrome_options.add_experimental_option('useAutomationExtension', False)
+        
         try:
-            # Let selenium find the right driver automatically
-            driver = webdriver.Chrome(options=chrome_options)
-            version = driver.capabilities['browserVersion']
-            logger.info(f"Chrome initialized successfully, version: {version}")
-            return driver
-        except Exception as e:
-            logger.error(f"Chrome initialization failed: {e}")
-            return None
+            # Try direct approach first
+            logger.info("Attempting to initialize Chrome driver directly...")
+            self.driver = webdriver.Chrome(options=chrome_options)
+            logger.info("✅ Chrome driver successfully initialized directly")
+            return self.driver
+        except Exception as e1:
+            logger.warning(f"⚠️ Direct initialization failed: {e1}")
+            time.sleep(2)  # Small delay between attempts
+            
+            try:
+                # Try with webdriver-manager
+                logger.info("Attempting to initialize Chrome driver with webdriver-manager...")
+                from selenium.webdriver.chrome.service import Service
+                from webdriver_manager.chrome import ChromeDriverManager
+                
+                try:
+                    # Try getting the path or directly installing
+                    chrome_driver_path = ChromeDriverManager().install()
+                    service = Service(executable_path=chrome_driver_path)
+                    self.driver = webdriver.Chrome(service=service, options=chrome_options)
+                    logger.info("✅ Chrome driver successfully initialized with webdriver-manager")
+                    return self.driver
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to use install() method: {e}")
+                    # Fallback to manual location
+                    chrome_driver_path = "/opt/render/.local/share/webdriver/chromedriver"
+                    if os.path.exists(chrome_driver_path):
+                        service = Service(executable_path=chrome_driver_path)
+                        self.driver = webdriver.Chrome(service=service, options=chrome_options)
+                        logger.info("✅ Chrome driver successfully initialized with manual path")
+                        return self.driver
+                    else:
+                        raise Exception("ChromeDriver not found at expected path")
+                
+            except Exception as e2:
+                logger.warning(f"⚠️ Webdriver-manager initialization failed: {e2}")
+                time.sleep(1)  # Small delay between attempts
+                
+                try:
+                    # Final attempt with undetected_chromedriver
+                    logger.info("Attempting to initialize with undetected_chromedriver...")
+                    import undetected_chromedriver as uc
+                    
+                    # Set environment variables to debug undetected_chromedriver
+                    os.environ['UC_LOG_LEVEL'] = 'DEBUG'
+                    
+                    # Make more resilient
+                    for attempt in range(3):
+                        try:
+                            self.driver = uc.Chrome(headless=True, options=chrome_options)
+                            logger.info("✅ Chrome driver successfully initialized with undetected_chromedriver")
+                            return self.driver
+                        except Exception as retry_error:
+                            logger.warning(f"⚠️ undetected_chromedriver attempt {attempt+1} failed: {retry_error}")
+                            time.sleep(2)  # Wait a bit before retrying
+                        
+                    # If we're here, all retry attempts failed
+                    raise Exception("All undetected_chromedriver attempts failed")
+                    
+                except Exception as e3:
+                    logger.error(f"❌ All initialization methods failed: {e3}")
+                    logger.error("Please make sure Chrome is installed on this system.")
+                    raise Exception("Failed to initialize Chrome driver after multiple attempts")
+
 
     def ensure_login(self):
         """Robust login verification with multiple checks"""
