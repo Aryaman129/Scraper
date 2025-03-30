@@ -32,7 +32,6 @@ RUN apt-get update && apt-get install -y \
     xdg-utils \
     libu2f-udev \
     libvulkan1 \
-    default-jre \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -43,6 +42,15 @@ RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | apt-key add
     && apt-get install -y google-chrome-stable \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
+
+# Install matching chromedriver
+RUN CHROME_VERSION=$(google-chrome-stable --version | grep -oP '(?<=Google Chrome )\d+\.\d+\.\d+') \
+    && CHROMEDRIVER_VERSION=$(curl -s "https://chromedriver.storage.googleapis.com/LATEST_RELEASE_${CHROME_VERSION%%.*}") \
+    && wget -q "https://chromedriver.storage.googleapis.com/${CHROMEDRIVER_VERSION}/chromedriver_linux64.zip" \
+    && unzip chromedriver_linux64.zip \
+    && mv chromedriver /usr/local/bin/chromedriver \
+    && chmod +x /usr/local/bin/chromedriver \
+    && rm chromedriver_linux64.zip
 
 # Create a working directory
 WORKDIR /app
@@ -59,5 +67,5 @@ COPY . .
 # Expose the port
 EXPOSE 8080
 
-# Run the application
-CMD ["gunicorn", "-b", "0.0.0.0:8080", "app:app", "--timeout", "120", "--workers", "1"] 
+# Run the application with memory optimization
+CMD ["gunicorn", "-b", "0.0.0.0:8080", "app:app", "--timeout", "300", "--workers", "1", "--max-requests", "1"] 

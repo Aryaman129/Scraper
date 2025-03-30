@@ -137,101 +137,47 @@ class SRMScraper:
         self.password = password
         
     def setup_driver(self):
-        """Initialize Chrome driver with appropriate options for Render deployment"""
-        logger.info("Setting up Chrome driver...")
+        """Robust Chrome initialization with fallbacks"""
+        chrome_options = webdriver.ChromeOptions()
         
-        chrome_options = Options()
-        # Essential flags for Render's free tier
-        chrome_options.add_argument('--headless')
+        # Critical stability arguments
+        chrome_options.add_argument('--headless=new')
         chrome_options.add_argument('--no-sandbox')
         chrome_options.add_argument('--disable-dev-shm-usage')
         chrome_options.add_argument('--disable-gpu')
-        
-        # Memory optimization flags (critical for Render free tier)
-        chrome_options.add_argument('--disable-renderer-backgrounding')
-        chrome_options.add_argument('--disable-background-timer-throttling')
-        chrome_options.add_argument('--disable-backgrounding-occluded-windows')
-        chrome_options.add_argument('--disable-client-side-phishing-detection')
-        chrome_options.add_argument('--memory-pressure-off')
-        chrome_options.add_argument('--single-process')  # Important for limiting memory usage
-        chrome_options.add_argument('--remote-debugging-port=9222')  # Enable debugging
-        
-        # Basic optimization flags
-        chrome_options.add_argument('--window-size=1920,1080')
         chrome_options.add_argument('--disable-extensions')
-        chrome_options.add_argument('--disable-infobars')
-        chrome_options.add_argument('--disable-notifications')
-        chrome_options.add_argument('--disable-popup-blocking')
-        chrome_options.add_argument('--start-maximized')
-        chrome_options.add_argument('--disable-blink-features=AutomationControlled')
-        chrome_options.add_experimental_option('excludeSwitches', ['enable-automation'])
-        chrome_options.add_experimental_option('useAutomationExtension', False)
         
-        try:
-            # Try direct approach first
-            logger.info("Attempting to initialize Chrome driver directly...")
-            self.driver = webdriver.Chrome(options=chrome_options)
-            logger.info("✅ Chrome driver successfully initialized directly")
-            return self.driver
-        except Exception as e1:
-            logger.warning(f"⚠️ Direct initialization failed: {e1}")
-            time.sleep(2)  # Small delay between attempts
-            
+        # Try multiple initialization approaches
+        for attempt in range(3):
             try:
-                # Try with webdriver-manager
-                logger.info("Attempting to initialize Chrome driver with webdriver-manager...")
-                from selenium.webdriver.chrome.service import Service
-                from webdriver_manager.chrome import ChromeDriverManager
+                logger.info(f"Chrome initialization attempt {attempt+1}")
                 
-                try:
-                    # Try getting the path or directly installing
-                    chrome_driver_path = ChromeDriverManager().install()
-                    service = Service(executable_path=chrome_driver_path)
-                    self.driver = webdriver.Chrome(service=service, options=chrome_options)
-                    logger.info("✅ Chrome driver successfully initialized with webdriver-manager")
-                    return self.driver
-                except Exception as e:
-                    logger.warning(f"⚠️ Failed to use install() method: {e}")
-                    # Fallback to manual location
-                    chrome_driver_path = "/opt/render/.local/share/webdriver/chromedriver"
-                    if os.path.exists(chrome_driver_path):
-                        service = Service(executable_path=chrome_driver_path)
-                        self.driver = webdriver.Chrome(service=service, options=chrome_options)
-                        logger.info("✅ Chrome driver successfully initialized with manual path")
-                        return self.driver
-                    else:
-                        raise Exception("ChromeDriver not found at expected path")
+                if attempt == 0:
+                    # Approach 1: Use pre-installed chromedriver from Dockerfile
+                    service = Service(executable_path="/usr/local/bin/chromedriver")
+                    driver = webdriver.Chrome(service=service, options=chrome_options)
+                    logger.info("✅ Chrome initialized using pre-installed chromedriver")
+                    return driver
+                    
+                elif attempt == 1:
+                    # Approach 2: Let Selenium find the driver
+                    service = Service()
+                    driver = webdriver.Chrome(service=service, options=chrome_options)
+                    logger.info("✅ Chrome initialized using default Service")
+                    return driver
                 
-            except Exception as e2:
-                logger.warning(f"⚠️ Webdriver-manager initialization failed: {e2}")
-                time.sleep(1)  # Small delay between attempts
-                
-                try:
-                    # Final attempt with undetected_chromedriver
-                    logger.info("Attempting to initialize with undetected_chromedriver...")
-                    import undetected_chromedriver as uc
+                else:
+                    # Approach 3: Direct Chrome options with no service
+                    driver = webdriver.Chrome(options=chrome_options)
+                    logger.info("✅ Chrome initialized with no explicit service")
+                    return driver
                     
-                    # Set environment variables to debug undetected_chromedriver
-                    os.environ['UC_LOG_LEVEL'] = 'DEBUG'
-                    
-                    # Make more resilient
-                    for attempt in range(3):
-                        try:
-                            self.driver = uc.Chrome(headless=True, options=chrome_options)
-                            logger.info("✅ Chrome driver successfully initialized with undetected_chromedriver")
-                            return self.driver
-                        except Exception as retry_error:
-                            logger.warning(f"⚠️ undetected_chromedriver attempt {attempt+1} failed: {retry_error}")
-                            time.sleep(2)  # Wait a bit before retrying
-                        
-                    # If we're here, all retry attempts failed
-                    raise Exception("All undetected_chromedriver attempts failed")
-                    
-                except Exception as e3:
-                    logger.error(f"❌ All initialization methods failed: {e3}")
-                    logger.error("Please make sure Chrome is installed on this system.")
-                    raise Exception("Failed to initialize Chrome driver after multiple attempts")
-
+            except Exception as e:
+                logger.warning(f"Chrome initialization attempt {attempt+1} failed: {e}")
+                time.sleep(1)  # Short delay between attempts
+        
+        logger.error("All Chrome initialization attempts failed")
+        return None
 
     def ensure_login(self):
         """Robust login verification with multiple checks"""
@@ -460,18 +406,26 @@ class SRMScraper:
             return False
 
     def get_attendance_page(self):
-        try:
-            logger.info(f"Navigating to attendance page: {ATTENDANCE_PAGE_URL}")
-            self.driver.get(ATTENDANCE_PAGE_URL)
-            logger.info("Starting extended wait...")
-            time.sleep(40)
-            logger.info("Wait completed, checking page source length...")
-            html_source = self.driver.page_source
-            logger.info(f"Retrieved page source: {len(html_source)} bytes")
-            return html_source
-        except Exception as e:
-            logger.error(f"Failed to get attendance page: {e}")
+        """Navigate to attendance page and get HTML with increased timeout"""
+        if not self.ensure_login():
             return None
+            
+        logger.info("Navigating to attendance page")
+        self.driver.get(ATTENDANCE_PAGE_URL)
+        
+        try:
+            # Increased wait time for slow Academia server
+            logger.info("Waiting 40 seconds for attendance page to load completely...")
+            time.sleep(40)  # Increased from 25 to 40 seconds
+            logger.info("Attendance page wait completed")
+        except Exception as e:
+            logger.warning(f"Timed out waiting for attendance page: {e}")
+            # Fallback to a longer sleep if the element isn't found
+            logger.info("Using fixed sleep time of 40 seconds")
+        
+        html_source = self.driver.page_source
+        logger.info(f"Retrieved page source: {len(html_source)} bytes")
+        return html_source
 
     def extract_registration_number(self, soup):
         """Modern registration number extraction with multiple fallbacks"""
@@ -809,15 +763,20 @@ class SRMScraper:
     # TIMETABLE SCRAPER METHODS
 
     def get_timetable_page(self):
-        """Navigate to timetable page and get HTML"""
+        """Navigate to timetable page and get HTML with increased timeout"""
         if not self.ensure_login():
             return None
         
         logger.info(f"Navigating to timetable page: {TIMETABLE_URL}")
         self.driver.get(TIMETABLE_URL)
-        time.sleep(22)  # Wait for the page to load
+        
+        # Increased wait time for slow Academia server
+        logger.info("Waiting 40 seconds for timetable page to load completely...")
+        time.sleep(40)  # Increased from 22 to 40 seconds
+        logger.info("Timetable page wait completed")
         
         html_source = self.driver.page_source
+        logger.info(f"Retrieved timetable page source: {len(html_source)} bytes")
         return html_source
 
     def dump_page_source(self, filename="debug_page_source.html", num_chars=1000):
