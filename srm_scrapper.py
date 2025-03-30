@@ -137,63 +137,24 @@ class SRMScraper:
         self.password = password
         
     def setup_driver(self):
-        """More resilient Chrome initialization"""
+        """Auto-detecting Chrome installation"""
         chrome_options = webdriver.ChromeOptions()
         
-        # Critical stability arguments
-        chrome_options.add_argument('--disable-blink-features=AutomationControlled')
-        chrome_options.add_argument('--no-first-run')
-        chrome_options.add_argument('--no-service-autorun')
-        chrome_options.add_argument('--no-default-browser-check')
-        chrome_options.add_argument('--disable-component-update')
-        chrome_options.add_argument('--disable-features=TranslateUI,BlinkGenPropertyTrees')
-        
-        # Memory optimization
-        chrome_options.add_argument('--disable-software-rasterizer')
-        chrome_options.add_argument('--disable-dev-shm-usage')
-        chrome_options.add_argument('--no-sandbox')
-        
-        # Headless configuration
+        # Core stability arguments
         chrome_options.add_argument('--headless=new')
-        chrome_options.add_argument('--window-size=1920,1080')
+        chrome_options.add_argument('--no-sandbox')
+        chrome_options.add_argument('--disable-dev-shm-usage')
+        chrome_options.add_argument('--disable-gpu')
         
-        # Reliability tweaks
-        chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-        chrome_options.add_experimental_option("useAutomationExtension", False)
-        
-        # Try different initialization approaches
         try:
-            # Approach 1: Standard ChromeDriver approach with binary path
-            chrome_options.binary_location = "/usr/bin/google-chrome-stable"
-            service = Service()
-            driver = webdriver.Chrome(service=service, options=chrome_options)
-            logger.info("✅ Chrome initialized successfully using standard approach")
+            # Let selenium find the right driver automatically
+            driver = webdriver.Chrome(options=chrome_options)
+            version = driver.capabilities['browserVersion']
+            logger.info(f"Chrome initialized successfully, version: {version}")
             return driver
-        except Exception as e1:
-            logger.warning(f"Standard Chrome initialization failed: {e1}")
-            
-            try:
-                # Approach 2: Use direct ChromeDriver path if it exists
-                driver_path = "/usr/local/bin/chromedriver"
-                if os.path.exists(driver_path):
-                    service = Service(executable_path=driver_path)
-                    driver = webdriver.Chrome(service=service, options=chrome_options)
-                    logger.info("✅ Chrome initialized using direct chromedriver path")
-                    return driver
-            except Exception as e2:
-                logger.warning(f"Direct path Chrome initialization failed: {e2}")
-            
-            try:
-                # Approach 3: Fallback to older Chrome version compatibility
-                chrome_options.add_argument("--ignore-certificate-errors")
-                chrome_options.add_argument("--disable-extensions")
-                chrome_options.add_argument("--disable-gpu")
-                driver = webdriver.Chrome(options=chrome_options)
-                logger.info("✅ Chrome initialized using fallback method")
-                return driver
-            except Exception as e3:
-                logger.error(f"All Chrome initialization methods failed: {e3}")
-                return None
+        except Exception as e:
+            logger.error(f"Chrome initialization failed: {e}")
+            return None
 
     def ensure_login(self):
         """Robust login verification with multiple checks"""
