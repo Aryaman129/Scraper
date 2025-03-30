@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: srm-scraper
+    env: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    numInstances: 1
+    healthCheckPath: /health
+    envVars:
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+    buildCommand: ""
+    startCommand: "" 
