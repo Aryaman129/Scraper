@@ -37,34 +37,42 @@ RUN apt-get update && apt-get install -y \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Chrome
+# Install Chrome with specific version
 RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | apt-key add - \
     && echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list \
     && apt-get update \
     && apt-get install -y google-chrome-stable \
+    && google-chrome-stable --version \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
+
+# Install specific ChromeDriver version (114.0.5735.90)
+RUN wget -q https://chromedriver.storage.googleapis.com/114.0.5735.90/chromedriver_linux64.zip \
+    && unzip chromedriver_linux64.zip \
+    && mv chromedriver /usr/local/bin/chromedriver \
+    && chmod +x /usr/local/bin/chromedriver \
+    && rm chromedriver_linux64.zip \
+    && chromedriver --version
 
 # Create a working directory
 WORKDIR /app
 
-# Install Python dependencies one by one
+# Install Python dependencies
 COPY requirements.txt .
-RUN pip install --no-cache-dir -v Flask==2.0.1 \
-    && pip install --no-cache-dir -v Werkzeug==2.0.1 \
-    && pip install --no-cache-dir -v itsdangerous==2.0.1 \
-    && pip install --no-cache-dir -v Jinja2==3.0.1 \
-    && pip install --no-cache-dir -v MarkupSafe==2.0.1 \
-    && pip install --no-cache-dir -v Flask-Cors==3.0.10 \
-    && pip install --no-cache-dir -v gunicorn==20.1.0 \
-    && pip install --no-cache-dir -v PyJWT==2.8.0 \
-    && pip install --no-cache-dir -v python-dotenv==0.19.0 \
-    && pip install --no-cache-dir -v selenium==4.10.0 \
-    && pip install --no-cache-dir -v beautifulsoup4==4.12.2 \
-    && pip install --no-cache-dir -v supabase==1.0.3 \
-    && pip install --no-cache-dir -v webdriver-manager==3.8.6 \
-    && pip install --no-cache-dir -v requests==2.31.0 \
-    && pip install --no-cache-dir -v psutil==5.9.8
+RUN pip install --no-cache-dir Flask==2.0.1 \
+    Werkzeug==2.0.1 \
+    itsdangerous==2.0.1 \
+    Jinja2==3.0.1 \
+    MarkupSafe==2.0.1 \
+    Flask-Cors==3.0.10 \
+    gunicorn==20.1.0 \
+    PyJWT==2.8.0 \
+    python-dotenv==0.19.0 \
+    selenium==4.10.0 \
+    beautifulsoup4==4.12.2 \
+    requests==2.31.0 \
+    psutil==5.9.8 \
+    supabase==1.0.3
 
 # Copy application code
 COPY . .

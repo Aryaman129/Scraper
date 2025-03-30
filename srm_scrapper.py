@@ -137,20 +137,32 @@ class SRMScraper:
         self.password = password
         
     def setup_driver(self):
-        """Connect to the pre-configured Chrome in the selenium/standalone-chrome image"""
-        chrome_options = webdriver.ChromeOptions()
-        
-        # Basic required options
-        chrome_options.add_argument('--headless=new')
-        chrome_options.add_argument('--no-sandbox')
-        chrome_options.add_argument('--disable-dev-shm-usage')
-        
-        # The standalone-chrome container already has ChromeDriver setup
+        """Setup Chrome with explicit ChromeDriver path"""
         try:
-            driver = webdriver.Chrome(options=chrome_options)
+            chrome_options = webdriver.ChromeOptions()
+            
+            # Required arguments for headless mode
+            chrome_options.add_argument('--headless=new')
+            chrome_options.add_argument('--no-sandbox')
+            chrome_options.add_argument('--disable-dev-shm-usage')
+            chrome_options.add_argument('--disable-gpu')
+            
+            # Use explicit ChromeDriver path
+            chrome_driver_path = "/usr/local/bin/chromedriver"
+            logger.info(f"Using ChromeDriver at: {chrome_driver_path}")
+            
+            # Explicitly specify the service with the driver path
+            service = Service(executable_path=chrome_driver_path)
+            
+            # Initialize Chrome with the service
+            driver = webdriver.Chrome(service=service, options=chrome_options)
+            
+            # Log Chrome version for debugging
             version = driver.capabilities.get('browserVersion', 'unknown')
             logger.info(f"✅ Chrome initialized successfully (version: {version})")
+            
             return driver
+            
         except Exception as e:
             logger.error(f"❌ Chrome initialization failed: {e}")
             return None
