@@ -6,8 +6,8 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     DEBIAN_FRONTEND=noninteractive
 
-# Install Chrome and dependencies with version pinning
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Install Chrome and other dependencies
+RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
     unzip \
@@ -32,25 +32,32 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     xdg-utils \
     libu2f-udev \
     libvulkan1 \
+    default-jre \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Chrome from official repo with version pinning
-RUN echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list \
-    && wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | apt-key add - \
+# Install Chrome
+RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | apt-key add - \
+    && echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list \
     && apt-get update \
-    && apt-get install -y google-chrome-stable=114.0.5735.90-1 \
-    && rm -rf /var/lib/apt/lists/* \
-    && google-chrome-stable --version
+    && apt-get install -y google-chrome-stable \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
+# Create a working directory
 WORKDIR /app
 
+# Copy requirements file
 COPY requirements.txt .
+
+# Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Copy application code
 COPY . .
 
+# Expose the port
 EXPOSE 8080
 
-# Add Xvfb support for headless operation
-CMD ["sh", "-c", "xvfb-run --auto-servernum gunicorn -b 0.0.0.0:8080 app:app --timeout 120 --workers 1"] 
+# Run the application
+CMD ["gunicorn", "-b", "0.0.0.0:8080", "app:app", "--timeout", "120", "--workers", "1"] 
