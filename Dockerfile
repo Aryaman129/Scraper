@@ -74,7 +74,7 @@ EXPOSE 8080
 CMD ["gunicorn", "-b", "0.0.0.0:8080", "app:app", "--timeout", "120", "--workers", "1"]
 
 # Install specific Chrome version
+ENV CHROME_VERSION="114.0.5735.90"
 RUN wget -q https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_${CHROME_VERSION}-1_amd64.deb \
-    && dpkg -i google-chrome-stable_${CHROME_VERSION}-1_amd64.deb \
-    || apt-get install -yf \
+    && dpkg -i google-chrome-stable_${CHROME_VERSION}-1_amd64.deb || apt-get install -yf \
     && rm google-chrome-stable_${CHROME_VERSION}-1_amd64.deb 
