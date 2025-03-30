@@ -4,9 +4,10 @@ FROM python:3.9-slim
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
-    DEBIAN_FRONTEND=noninteractive
+    DEBIAN_FRONTEND=noninteractive \
+    CHROME_VERSION="114.0.5735.90"
 
-# Install Chrome and other dependencies
+# Install system dependencies and Chrome
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
@@ -32,49 +33,32 @@ RUN apt-get update && apt-get install -y \
     xdg-utils \
     libu2f-udev \
     libvulkan1 \
-    default-jre \
     libxss1 \
     xvfb \
-    libgtk-3-0 \
     libgdk-pixbuf2.0-0 \
     libnss3-dev \
-    libasound2 \
     libxtst6 \
-    fonts-liberation \
     libappindicator3-1 \
     mesa-utils \
     libgl1-mesa-glx \
+    && wget -q https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_${CHROME_VERSION}-1_amd64.deb \
+    && dpkg -i google-chrome-stable_${CHROME_VERSION}-1_amd64.deb || apt-get install -yf \
+    && rm google-chrome-stable_${CHROME_VERSION}-1_amd64.deb \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Chrome
-RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | apt-key add - \
-    && echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list \
-    && apt-get update \
-    && apt-get install -y google-chrome-stable \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
-
-# Create a working directory
+# Create and set working directory
 WORKDIR /app
 
-# Copy requirements file
+# Copy requirements first to leverage Docker cache
 COPY requirements.txt .
-
-# Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY . .
 
-# Expose the port
+# Expose port
 EXPOSE 8080
 
-# Run the application
-CMD ["gunicorn", "-b", "0.0.0.0:8080", "app:app", "--timeout", "120", "--workers", "1"]
-
-# Install specific Chrome version
-ENV CHROME_VERSION="114.0.5735.90"
-RUN wget -q https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_${CHROME_VERSION}-1_amd64.deb \
-    && dpkg -i google-chrome-stable_${CHROME_VERSION}-1_amd64.deb || apt-get install -yf \
-    && rm google-chrome-stable_${CHROME_VERSION}-1_amd64.deb 
+# Run application
+CMD ["gunicorn", "-b", "0.0.0.0:8080", "app:app", "--timeout", "120", "--workers", "1"] 
