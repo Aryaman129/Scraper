@@ -5,47 +5,29 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     DEBIAN_FRONTEND=noninteractive \
-    CHROME_VERSION="114.0.5735.90"
+    CHROME_VERSION="114.0.5735.90-1"
 
-# Install system dependencies and Chrome
-RUN apt-get update && apt-get install -y \
-    wget \
-    gnupg \
-    unzip \
-    fonts-liberation \
-    libasound2 \
-    libatk-bridge2.0-0 \
-    libatk1.0-0 \
-    libatspi2.0-0 \
-    libcups2 \
-    libdbus-1-3 \
-    libdrm2 \
-    libgbm1 \
-    libgtk-3-0 \
-    libnspr4 \
-    libnss3 \
-    libwayland-client0 \
-    libxcomposite1 \
-    libxdamage1 \
-    libxfixes3 \
-    libxkbcommon0 \
-    libxrandr2 \
-    xdg-utils \
-    libu2f-udev \
-    libvulkan1 \
-    libxss1 \
-    xvfb \
-    libgdk-pixbuf2.0-0 \
-    libnss3-dev \
-    libxtst6 \
-    libappindicator3-1 \
-    mesa-utils \
-    libgl1-mesa-glx \
-    && wget -q https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_${CHROME_VERSION}-1_amd64.deb \
-    && dpkg -i google-chrome-stable_${CHROME_VERSION}-1_amd64.deb || apt-get install -yf \
-    && rm google-chrome-stable_${CHROME_VERSION}-1_amd64.deb \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+# Install system dependencies and Chrome with proper error handling
+RUN set -euxo pipefail && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates \
+        wget \
+        gnupg \
+        fonts-liberation \
+        libgl1 \
+        xvfb \
+        && \
+    # Install Chrome
+    wget -q https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_${CHROME_VERSION}_amd64.deb && \
+    apt-get install -y ./google-chrome-stable_${CHROME_VERSION}_amd64.deb && \
+    rm google-chrome-stable_${CHROME_VERSION}_amd64.deb && \
+    # Cleanup
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Verify Chrome installation
+RUN google-chrome-stable --version
 
 # Create and set working directory
 WORKDIR /app
