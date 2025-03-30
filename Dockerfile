@@ -32,6 +32,8 @@ RUN apt-get update && apt-get install -y \
     xdg-utils \
     libu2f-udev \
     libvulkan1 \
+    curl \
+    grep \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -43,14 +45,16 @@ RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | apt-key add
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Install matching chromedriver
-RUN CHROME_VERSION=$(google-chrome-stable --version | grep -oP '(?<=Google Chrome )\d+\.\d+\.\d+') \
-    && CHROMEDRIVER_VERSION=$(curl -s "https://chromedriver.storage.googleapis.com/LATEST_RELEASE_${CHROME_VERSION%%.*}") \
+# Install matching chromedriver with simplified commands
+RUN CHROME_VERSION=$(google-chrome-stable --version | awk '{print $3}') \
+    && CHROME_MAJOR_VERSION=$(echo $CHROME_VERSION | cut -d '.' -f 1) \
+    && CHROMEDRIVER_VERSION=$(curl -s "https://chromedriver.storage.googleapis.com/LATEST_RELEASE_${CHROME_MAJOR_VERSION}") \
     && wget -q "https://chromedriver.storage.googleapis.com/${CHROMEDRIVER_VERSION}/chromedriver_linux64.zip" \
     && unzip chromedriver_linux64.zip \
     && mv chromedriver /usr/local/bin/chromedriver \
     && chmod +x /usr/local/bin/chromedriver \
-    && rm chromedriver_linux64.zip
+    && rm chromedriver_linux64.zip \
+    && echo "ChromeDriver ${CHROMEDRIVER_VERSION} installed successfully"
 
 # Create a working directory
 WORKDIR /app
