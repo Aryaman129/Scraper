@@ -137,113 +137,75 @@ class SRMScraper:
         self.password = password
         
     def setup_driver(self):
-        """Initialize Chrome driver with appropriate options for Render deployment"""
-        logger.info("Setting up Chrome driver...")
+        """More resilient Chrome initialization"""
+        chrome_options = webdriver.ChromeOptions()
         
-        chrome_options = Options()
-        # Essential flags for Render's free tier
-        chrome_options.add_argument('--headless')
-        chrome_options.add_argument('--no-sandbox')
-        chrome_options.add_argument('--disable-dev-shm-usage')
-        chrome_options.add_argument('--disable-gpu')
-        
-        # Memory optimization flags (critical for Render free tier)
-        chrome_options.add_argument('--disable-renderer-backgrounding')
-        chrome_options.add_argument('--disable-background-timer-throttling')
-        chrome_options.add_argument('--disable-backgrounding-occluded-windows')
-        chrome_options.add_argument('--disable-client-side-phishing-detection')
-        chrome_options.add_argument('--memory-pressure-off')
-        chrome_options.add_argument('--single-process')  # Important for limiting memory usage
-        chrome_options.add_argument('--remote-debugging-port=9222')  # Enable debugging
-        
-        # Basic optimization flags
-        chrome_options.add_argument('--window-size=1920,1080')
-        chrome_options.add_argument('--disable-extensions')
-        chrome_options.add_argument('--disable-infobars')
-        chrome_options.add_argument('--disable-notifications')
-        chrome_options.add_argument('--disable-popup-blocking')
-        chrome_options.add_argument('--start-maximized')
+        # Critical stability arguments
         chrome_options.add_argument('--disable-blink-features=AutomationControlled')
-        chrome_options.add_experimental_option('excludeSwitches', ['enable-automation'])
-        chrome_options.add_experimental_option('useAutomationExtension', False)
+        chrome_options.add_argument('--no-first-run')
+        chrome_options.add_argument('--no-service-autorun')
+        chrome_options.add_argument('--no-default-browser-check')
+        chrome_options.add_argument('--disable-component-update')
+        chrome_options.add_argument('--disable-features=TranslateUI,BlinkGenPropertyTrees')
         
-        try:
-            # Try direct approach first
-            logger.info("Attempting to initialize Chrome driver directly...")
-            self.driver = webdriver.Chrome(options=chrome_options)
-            logger.info("✅ Chrome driver successfully initialized directly")
-            return self.driver
-        except Exception as e1:
-            logger.warning(f"⚠️ Direct initialization failed: {e1}")
-            time.sleep(2)  # Small delay between attempts
-            
-            try:
-                # Try with webdriver-manager
-                logger.info("Attempting to initialize Chrome driver with webdriver-manager...")
-                from selenium.webdriver.chrome.service import Service
-                from webdriver_manager.chrome import ChromeDriverManager
-                
-                try:
-                    # Try getting the path or directly installing
-                    chrome_driver_path = ChromeDriverManager().install()
-                    service = Service(executable_path=chrome_driver_path)
-                    self.driver = webdriver.Chrome(service=service, options=chrome_options)
-                    logger.info("✅ Chrome driver successfully initialized with webdriver-manager")
-                    return self.driver
-                except Exception as e:
-                    logger.warning(f"⚠️ Failed to use install() method: {e}")
-                    # Fallback to manual location
-                    chrome_driver_path = "/opt/render/.local/share/webdriver/chromedriver"
-                    if os.path.exists(chrome_driver_path):
-                        service = Service(executable_path=chrome_driver_path)
-                        self.driver = webdriver.Chrome(service=service, options=chrome_options)
-                        logger.info("✅ Chrome driver successfully initialized with manual path")
-                        return self.driver
-                    else:
-                        raise Exception("ChromeDriver not found at expected path")
-                
-            except Exception as e2:
-                logger.warning(f"⚠️ Webdriver-manager initialization failed: {e2}")
-                time.sleep(1)  # Small delay between attempts
-                
-                try:
-                    # Final attempt with undetected_chromedriver
-                    logger.info("Attempting to initialize with undetected_chromedriver...")
-                    import undetected_chromedriver as uc
-                    
-                    # Set environment variables to debug undetected_chromedriver
-                    os.environ['UC_LOG_LEVEL'] = 'DEBUG'
-                    
-                    # Make more resilient
-                    for attempt in range(3):
-                        try:
-                            self.driver = uc.Chrome(headless=True, options=chrome_options)
-                            logger.info("✅ Chrome driver successfully initialized with undetected_chromedriver")
-                            return self.driver
-                        except Exception as retry_error:
-                            logger.warning(f"⚠️ undetected_chromedriver attempt {attempt+1} failed: {retry_error}")
-                            time.sleep(2)  # Wait a bit before retrying
-                        
-                    # If we're here, all retry attempts failed
-                    raise Exception("All undetected_chromedriver attempts failed")
-                    
-                except Exception as e3:
-                    logger.error(f"❌ All initialization methods failed: {e3}")
-                    logger.error("Please make sure Chrome is installed on this system.")
-                    raise Exception("Failed to initialize Chrome driver after multiple attempts")
+        # Memory optimization
+        chrome_options.add_argument('--single-process')
+        chrome_options.add_argument('--disable-software-rasterizer')
+        chrome_options.add_argument('--disable-dev-shm-usage')
+        chrome_options.add_argument('--memory-pressure-off')
+        
+        # Headless configuration
+        chrome_options.add_argument('--headless=new')
+        chrome_options.add_argument('--window-size=1920,1080')
+        
+        # Reliability tweaks
+        chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        chrome_options.add_experimental_option("useAutomationExtension", False)
+        
+        # Version-pinned Chrome installation
+        CHROME_VERSION = "114.0.5735.90"  # Match this with your ChromeDriver
+        chrome_options.binary_location = f"/usr/bin/google-chrome-{CHROME_VERSION}"
+        
+        # Initialize with webdriver-manager
+        from webdriver_manager.chrome import ChromeDriverManager
+        service = Service(ChromeDriverManager(version=CHROME_VERSION).install())
+        
+        return webdriver.Chrome(service=service, options=chrome_options)
 
     def ensure_login(self):
-        """Login if not already logged in, or reuse existing session"""
-        # If already logged in, return True
+        """Robust login verification with multiple checks"""
         if self.is_logged_in:
-            return True
-            
-        # Initialize driver if needed
-        if not self.driver:
-            self.setup_driver()
-            
-        # Perform login
-        return self.login()
+            # Verify active session
+            try:
+                self.driver.get(f"{BASE_URL}/#Page:Student_Profile")
+                WebDriverWait(self.driver, 10).until(
+                    EC.presence_of_element_located((By.XPATH, "//h2[contains(., 'Academic Profile')]"))
+                )
+                return True
+            except Exception as e:
+                logger.warning(f"Session verification failed: {e}")
+                self.is_logged_in = False
+
+        # Perform full login flow
+        if self.login():
+            # Post-login checks
+            try:
+                # Check for dashboard elements
+                WebDriverWait(self.driver, 15).until(
+                    EC.presence_of_all_elements_located((By.XPATH, "//*[contains(text(), 'My Attendance') or contains(text(), 'Time Table')]"))
+                )
+                
+                # Verify cookies
+                if not self.verify_cookies():
+                    raise Exception("Cookie verification failed after login")
+                    
+                self.is_logged_in = True
+                return True
+            except Exception as e:
+                logger.error(f"Post-login verification failed: {e}")
+                self.driver.save_screenshot("post_login_failure.png")
+                return False
+        return False
     
     def create_jwt_token(self, email):
         """Create a JWT token with 30-day expiration"""
@@ -456,29 +418,38 @@ class SRMScraper:
         return html_source
 
     def extract_registration_number(self, soup):
-        """Extract registration number from page HTML"""
-        registration_number = None
-        label_td = soup.find("td", string=lambda text: text and "Registration Number" in text)
-        if label_td:
-            value_td = label_td.find_next("td")
-            if value_td:
-                strong_elem = value_td.find("strong") or value_td.find("b")
-                if strong_elem:
-                    registration_number = strong_elem.get_text(strip=True)
-                else:
-                    registration_number = value_td.get_text(strip=True)
-        if not registration_number:
-            for row in soup.find_all("tr"):
-                tds = row.find_all("td")
-                if len(tds) >= 2 and "Registration" in tds[0].get_text():
-                    registration_number = tds[1].get_text(strip=True)
-                    break
-        if not registration_number:
-            import re
-            match = re.search(r'RA\d{10,}', soup.get_text())
-            if match:
-                registration_number = match.group(0)
-        return registration_number
+        """Modern registration number extraction with multiple fallbacks"""
+        # Method 1: Meta tag extraction
+        meta_tag = soup.find('meta', attrs={'name': 'registration-number'})
+        if meta_tag and (content := meta_tag.get('content', '')):
+            if match := re.search(r'RA\d{10}', content):
+                return match.group(0)
+        
+        # Method 2: Data attribute in profile section
+        profile_div = soup.find('div', class_='profile-info')
+        if profile_div and (data_reg := profile_div.get('data-registration')):
+            return data_reg.strip()
+        
+        # Method 3: Updated table structure parsing
+        for row in soup.select('table.profile-table tr'):
+            tds = row.find_all('td')
+            if len(tds) >= 2 and 'Registration' in tds[0].get_text():
+                reg_text = tds[1].get_text(strip=True)
+                if match := re.search(r'RA\d{10}', reg_text):
+                    return match.group(0)
+        
+        # Method 4: Hidden input field fallback
+        hidden_input = soup.find('input', {'name': 'reg_number'})
+        if hidden_input and (value := hidden_input.get('value')):
+            return value.strip()
+        
+        # Final fallback: Aggressive text search
+        if match := re.search(r'\bRA\d{10}\b', soup.get_text()):
+            return match.group(0)
+        
+        logger.error("All registration number extraction methods failed")
+        self.dump_page_source("registration_error.html")
+        return None
 
     def get_user_id(self, registration_number):
         """Get or create user ID in Supabase"""
@@ -1262,13 +1233,15 @@ class SRMScraper:
             return {"status": "error", "message": str(e)}
 
     def clear_browser_cache(self):
-        """Clear browser cache to free up memory"""
+        """Comprehensive cache clearance"""
         try:
-            self.driver.execute_script("window.gc();")  # Force garbage collection
             self.driver.execute_cdp_cmd('Network.clearBrowserCache', {})
-            logger.info("Browser cache cleared")
+            self.driver.execute_cdp_cmd('Network.clearBrowserCookies', {})
+            self.driver.execute_script("window.localStorage.clear();")
+            self.driver.execute_script("window.sessionStorage.clear();")
+            logger.info("Full browser state cleared")
         except Exception as e:
-            logger.warning(f"Failed to clear browser cache: {e}")
+            logger.error(f"Cache clearance failed: {e}")
 
     def log_memory_usage(self):
         """Log current memory usage to help with debugging"""
@@ -1436,6 +1409,19 @@ class SRMScraper:
             return 0
         except:
             return 0
+
+    def __del__(self):
+        """Destructor with forced resource cleanup"""
+        try:
+            if hasattr(self, 'driver') and self.driver:
+                self.driver.quit()
+                logger.info("Driver forcefully closed in destructor")
+        except Exception as e:
+            logger.warning(f"Destructor error: {e}")
+        finally:
+            # Force garbage collection
+            import gc
+            gc.collect()
 
 # Public interface to match the original script
 def run_scraper(email, password, scraper_type="attendance"):

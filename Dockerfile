@@ -33,6 +33,17 @@ RUN apt-get update && apt-get install -y \
     libu2f-udev \
     libvulkan1 \
     default-jre \
+    libxss1 \
+    xvfb \
+    libgtk-3-0 \
+    libgdk-pixbuf2.0-0 \
+    libnss3-dev \
+    libasound2 \
+    libxtst6 \
+    fonts-liberation \
+    libappindicator3-1 \
+    mesa-utils \
+    libgl1-mesa-glx \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -60,4 +71,10 @@ COPY . .
 EXPOSE 8080
 
 # Run the application
-CMD ["gunicorn", "-b", "0.0.0.0:8080", "app:app", "--timeout", "120", "--workers", "1"] 
+CMD ["gunicorn", "-b", "0.0.0.0:8080", "app:app", "--timeout", "120", "--workers", "1"]
+
+# Install specific Chrome version
+RUN wget -q https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_${CHROME_VERSION}-1_amd64.deb \
+    && dpkg -i google-chrome-stable_${CHROME_VERSION}-1_amd64.deb \
+    || apt-get install -yf \
+    && rm google-chrome-stable_${CHROME_VERSION}-1_amd64.deb 
