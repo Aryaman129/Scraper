@@ -404,23 +404,18 @@ class SRMScraper:
             return False
 
     def get_attendance_page(self):
-        """Navigate to attendance page and get HTML"""
-        if not self.ensure_login():
-            return None
-            
-        logger.info("Navigating to attendance page")
-        self.driver.get(ATTENDANCE_PAGE_URL)
-        
         try:
-            time.sleep(25)
-            logger.info("Attendance page loaded successfully")
+            logger.info(f"Navigating to attendance page: {ATTENDANCE_PAGE_URL}")
+            self.driver.get(ATTENDANCE_PAGE_URL)
+            logger.info("Starting extended wait...")
+            time.sleep(40)
+            logger.info("Wait completed, checking page source length...")
+            html_source = self.driver.page_source
+            logger.info(f"Retrieved page source: {len(html_source)} bytes")
+            return html_source
         except Exception as e:
-            logger.warning(f"Timed out waiting for attendance page: {e}")
-            # Fallback to a longer sleep if the element isn't found
-            logger.info("Using fixed sleep time of 25 seconds")
-        
-        html_source = self.driver.page_source
-        return html_source
+            logger.error(f"Failed to get attendance page: {e}")
+            return None
 
     def extract_registration_number(self, soup):
         """Modern registration number extraction with multiple fallbacks"""
