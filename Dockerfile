@@ -4,30 +4,30 @@ FROM python:3.9-slim
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
-    DEBIAN_FRONTEND=noninteractive \
-    CHROME_VERSION="114.0.5735.90"
+    DEBIAN_FRONTEND=noninteractive
 
-# Install system dependencies and Chrome
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-        ca-certificates \
-        wget \
-        gnupg \
-        fonts-liberation \
-        libgl1 \
-        xvfb \
-        gpg-agent \
-        software-properties-common && \
-    # Add Chrome repo
-    wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | apt-key add - && \
-    echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list && \
-    apt-get update && \
-    apt-get install -y google-chrome-stable=${CHROME_VERSION}-1 && \
-    # Cleanup
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+# Install Chrome using official recommended method
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    wget \
+    gnupg \
+    libxss1 \
+    libxtst6 \
+    libx11-xcb1 \
+    libxcomposite1 \
+    libxcursor1 \
+    libnss3 \
+    libatk1.0-0 \
+    libatk-bridge2.0-0 \
+    libdrm2 \
+    libgbm1 \
+    libasound2 \
+    fonts-liberation \
+    xvfb && \
+    wget https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_114.0.5735.90-1_amd64.deb && \
+    dpkg -i google-chrome-stable_114.0.5735.90-1_amd64.deb || apt-get install -yf && \
+    rm google-chrome-stable_114.0.5735.90-1_amd64.deb
 
-# Verify Chrome installation
+# Verify installation
 RUN google-chrome-stable --version
 
 # Create and set working directory
